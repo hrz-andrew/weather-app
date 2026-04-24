@@ -1343,7 +1343,7 @@ async function setLocationSet(setName, btn) {
         if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
     });
     renderSummary();
-    await Promise.all(locations.map(loc => loadLocation(loc, false)));
+    for (const loc of locations) { await loadLocation(loc, false); }
 }
 
 
@@ -1376,7 +1376,12 @@ async function fetchWeather(loc) {
         past_days: 1,
         models:    model
     });
-    const res = await fetch(`${API_URL}?${params}`);
+    // Retry once on 429 (rate limit) after a short back-off
+    let res = await fetch(`${API_URL}?${params}`);
+    if (res.status === 429) {
+        await new Promise(r => setTimeout(r, 1500));
+        res = await fetch(`${API_URL}?${params}`);
+    }
     if (!res.ok) {
         const txt = await res.text();
         throw new Error(`API ${res.status}: ${txt.slice(0,200)}`);
@@ -3267,7 +3272,7 @@ async function refreshAll(force = false) {
         const body = document.getElementById(`body-${loc.id}`);
         if (body) body.innerHTML = '<div class="loading-state"><div class="spinner"></div><span style="font-size:13px">Loading…</span></div>';
     });
-    await Promise.all(locations.map(loc => loadLocation(loc, true)));
+    for (const loc of locations) { await loadLocation(loc, true); }
     const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
     document.getElementById('updated-time').textContent = `Last updated: ${now} PT`;
 }
@@ -3423,7 +3428,7 @@ async function addLocation() {
     if (Object.keys(weatherData).length) renderSummary();
 
     // loadLocation(loc, false) respects the 30-min cache — fresh entries skip the API.
-    await Promise.all(locations.map(loc => loadLocation(loc, false)));
+    for (const loc of locations) { await loadLocation(loc, false); }
 
     const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
     const modelLabel = activeModel === 'ecmwf-local' ? 'ECMWF Local (Windy)' : activeModel.toUpperCase();
