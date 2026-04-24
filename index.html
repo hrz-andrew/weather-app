@@ -3398,7 +3398,27 @@ async function addLocation() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+// Try to load fresh ECMWF Local data from JSONBin before init.
+// Overwrites window.FORECAST_DATA if the bin has newer data.
+// On GitHub Pages the local script tag doesn't exist, so this is the only source.
+async function tryLoadFromJsonBin() {
+    try {
+        const res = await fetch('https://api.jsonbin.io/v3/b/69ebade636566621a8ea444d/latest');
+        if (!res.ok) return;
+        const json = await res.json();
+        if (json.record && json.record.locations && json.record.locations.length) {
+            window.FORECAST_DATA = json.record;
+            console.log('[wx] FORECAST_DATA loaded from JSONBin ·', json.record.generated);
+        }
+    } catch(e) {
+        console.warn('[wx] JSONBin fetch failed — using local file or API fallback', e);
+    }
+}
+
 (async function init() {
+    // Load fresh forecast data from JSONBin (works on GitHub Pages without local file)
+    await tryLoadFromJsonBin();
+
     // Restore saved model button state
     document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
     const savedBtn = document.getElementById(`btn-${activeModel}`);
