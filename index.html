@@ -1,0 +1,3445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bay Area Weather Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    <!-- Local ECMWF forecast data — written daily by the scheduled Windy scraper task.
+         If the file is absent the dashboard falls back to the Open-Meteo API. -->
+    <script src="forecast-data.js" onerror="console.warn('[wx] forecast-data.js not found — API fallback active')"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0c1520;
+            color: #d0dce8;
+            min-height: 100vh;
+        }
+
+        header {
+            background: linear-gradient(135deg, #111f30, #0c1520);
+            padding: 18px 32px;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            gap: 16px;
+            border-bottom: 1px solid #1e3048;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            box-shadow: 0 2px 24px rgba(0,0,0,0.5);
+        }
+
+        .header-left h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.4px;
+        }
+
+        .header-left .subtitle {
+            font-size: 12px;
+            color: #4a7a9a;
+            margin-top: 2px;
+        }
+
+        .header-actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
+
+        .btn {
+            padding: 9px 18px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s;
+            letter-spacing: 0.2px;
+        }
+
+        .btn-refresh {
+            background: #1a2e42;
+            color: #7dd3fc;
+            border: 1px solid #1e3a52;
+        }
+
+        .btn-refresh:hover { background: #1e3a52; }
+
+        .btn-primary {
+            background: #1d4ed8;
+            color: white;
+        }
+
+        .btn-primary:hover { background: #2563eb; }
+
+        .main {
+            padding: 28px 32px;
+            max-width: 1700px;
+            margin: 0 auto;
+        }
+
+        /* ── Water-type switcher (Freshwater / Saltwater) ──
+           Lives inside the top page header alongside the model switcher, so
+           it's compact: smaller padding, no margin. */
+        .water-switcher {
+            display: inline-flex;
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 10px;
+            padding: 3px;
+            gap: 2px;
+        }
+
+        .water-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border: none;
+            background: none;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 7px;
+            transition: all 0.2s;
+            letter-spacing: 0.2px;
+        }
+
+        .water-btn .water-icon { font-size: 14px; line-height: 1; }
+
+        .water-btn:hover:not(.active) { color: #7ab0d0; background: #142036; }
+
+        .water-btn.active {
+            background: linear-gradient(135deg, #1d4ed8, #1e40af);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(29, 78, 216, 0.35);
+        }
+
+        .water-btn#water-saltwater.active {
+            background: linear-gradient(135deg, #0e7490, #155e75);
+            box-shadow: 0 2px 8px rgba(14, 116, 144, 0.4);
+        }
+
+        /* ── Summary Section ── */
+        .summary-section {
+            background: linear-gradient(135deg, #111f30, #0e1a28);
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            padding: 24px 28px;
+            margin-bottom: 28px;
+        }
+
+        .section-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #4a7a9a;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .section-title::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #1e3048;
+        }
+
+        .section-title:hover { color: #6a9ab8; }
+
+        .section-chevron {
+            font-size: 10px;
+            color: #3a6a8a;
+            transition: transform 0.25s ease;
+            flex-shrink: 0;
+        }
+
+        .summary-section.collapsed .section-chevron { transform: rotate(-90deg); }
+
+        .summary-body {
+            overflow: hidden;
+            transition: max-height 0.3s ease, opacity 0.25s ease;
+            max-height: 2000px;
+            opacity: 1;
+        }
+
+        .summary-section.collapsed .summary-body {
+            max-height: 0;
+            opacity: 0;
+        }
+
+        .summary-section.collapsed {
+            padding-bottom: 20px;
+        }
+
+        .summary-section.collapsed .section-title {
+            margin-bottom: 0;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .summary-card {
+            background: #0c1520;
+            border-radius: 12px;
+            padding: 14px 16px;
+            border: 1px solid #1e3048;
+            transition: border-color 0.2s;
+        }
+
+        .summary-card:hover { border-color: #2a4a6a; }
+
+        .summary-card .s-label {
+            font-size: 11px;
+            color: #4a7a9a;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .summary-card .s-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #fff;
+            margin: 6px 0 2px;
+            line-height: 1;
+        }
+
+        .summary-card .s-sub {
+            font-size: 12px;
+            color: #3a6a8a;
+        }
+
+        /* ── Stability Forecast panel ── */
+        .stability-forecast {
+            margin-top: 16px;
+            background: linear-gradient(135deg, #0e1a2c, #101e30);
+            border: 1px solid #1e3048;
+            border-radius: 14px;
+            padding: 16px 20px 18px;
+        }
+        .sf-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .sf-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: #e0eaf4;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .sf-subtitle {
+            font-size: 11px;
+            color: #7aa8c8;
+            font-weight: 500;
+        }
+        .sf-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 14px;
+        }
+        @media (max-width: 900px) { .sf-grid { grid-template-columns: 1fr; } }
+        .sf-col {
+            background: #0c1520;
+            border: 1px solid #1a2e42;
+            border-radius: 10px;
+            padding: 12px 14px;
+        }
+        .sf-col-head {
+            font-size: 11px;
+            font-weight: 700;
+            color: #7aa8c8;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .sf-col-sub {
+            font-size: 11px;
+            color: #3a6a8a;
+            margin-bottom: 12px;
+        }
+        .sf-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 0;
+            border-bottom: 1px dashed #1a2e42;
+        }
+        .sf-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .sf-row:first-child { padding-top: 0; }
+        .sf-rank {
+            flex: 0 0 auto;
+            width: 22px;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.3;
+        }
+        .sf-body { flex: 1 1 auto; min-width: 0; }
+        .sf-row-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+        .sf-loc {
+            font-size: 13px;
+            font-weight: 700;
+            color: #fff;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .sf-score {
+            font-size: 11px;
+            font-weight: 700;
+            color: #4ade80;
+            flex: 0 0 auto;
+        }
+        .sf-score.med { color: #fbbf24; }
+        .sf-score.low { color: #f97316; }
+        .sf-score.bad { color: #ef4444; }
+        .sf-reason {
+            font-size: 11px;
+            color: #a5b9d0;
+            line-height: 1.45;
+        }
+        .sf-chip {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin: 2px 4px 0 0;
+            background: #112235;
+            color: #7aa8c8;
+            border: 1px solid #1a2e42;
+        }
+        .sf-chip.good { background: #0d2a1a; color: #4ade80; border-color: #1a4a2a; }
+        .sf-chip.warn { background: #2a1d08; color: #fbbf24; border-color: #4a3410; }
+        .sf-chip.bad  { background: #2a1012; color: #f87171; border-color: #4a1a1d; }
+        .sf-empty {
+            font-size: 12px;
+            color: #4a7a9a;
+            font-style: italic;
+            padding: 8px 0;
+        }
+
+        .recommendation-box {
+            background: linear-gradient(135deg, #0d2a1a, #0a1f15);
+            border: 1px solid #1a4a2a;
+            border-radius: 12px;
+            padding: 14px 20px;
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+        }
+
+        .rec-icon { font-size: 26px; flex-shrink: 0; }
+
+        .rec-text strong {
+            color: #4ade80;
+            font-size: 14px;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .rec-text span {
+            color: #6a9a7a;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .compare-strip {
+            display: flex;
+            gap: 8px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .compare-chip {
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 20px;
+            padding: 5px 12px;
+            font-size: 12px;
+            color: #7a9ab0;
+        }
+
+        .compare-chip strong { color: #a0c8e8; }
+
+        /* ── Location Cards ── */
+        .locations-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 22px;
+        }
+
+        .location-card {
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            overflow: hidden;
+            transition: border-color 0.2s;
+        }
+
+        .location-card:hover { border-color: #2a4a6a; }
+
+        .card-header {
+            padding: 18px 22px 14px;
+            background: linear-gradient(135deg, #142036, #0e1a2c);
+            border-bottom: 1px solid #1e3048;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .card-header h3 {
+            font-size: 17px;
+            color: #fff;
+            font-weight: 700;
+        }
+
+        .card-header .loc-label {
+            font-size: 12px;
+            color: #3a6a8a;
+            margin-top: 3px;
+        }
+
+        .remove-btn {
+            background: none;
+            border: none;
+            color: #3a5a7a;
+            cursor: pointer;
+            font-size: 16px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.2s;
+            line-height: 1;
+        }
+
+        .remove-btn:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+
+        /* Per-card overflow menu (vertical dots → dropdown with actions).
+           Debug dump + remove location used to sit exposed in the header;
+           tucking them behind "⋮" keeps the header tidy. */
+        .card-menu {
+            position: relative;
+        }
+
+        .card-menu-btn {
+            background: none;
+            border: none;
+            color: #4a7a9a;
+            cursor: pointer;
+            font-size: 20px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            line-height: 1;
+            transition: all 0.2s;
+        }
+
+        .card-menu-btn:hover { color: #e0eaf4; background: #1a2e42; }
+
+        .card-menu-dropdown {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            min-width: 180px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 10px;
+            padding: 4px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+            display: none;
+        }
+
+        .card-menu-dropdown.open { display: block; }
+
+        .card-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            padding: 8px 10px;
+            background: none;
+            border: none;
+            color: #cfe7ff;
+            font-size: 13px;
+            text-align: left;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: background 0.15s;
+        }
+
+        .card-menu-item:hover { background: #142036; }
+        .card-menu-item.danger { color: #fca5a5; }
+        .card-menu-item.danger:hover { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+
+        .card-menu-item .menu-icon { font-size: 14px; line-height: 1; width: 16px; text-align: center; }
+
+        /* Current conditions row */
+        .current-conditions {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .cond-item {
+            padding: 14px 16px;
+            text-align: center;
+            border-right: 1px solid #1e3048;
+            border-bottom: 1px solid #1e3048;
+        }
+
+        /* Remove right border on every 3rd item (last in each row) */
+        .cond-item:nth-child(3n) { border-right: none; }
+        /* Remove bottom border on last row of 3 items */
+        .cond-item:nth-last-child(-n+3) { border-bottom: none; }
+        /* Keep last-child override for safety */
+        .cond-item:last-child { border-right: none; }
+
+        .cond-label {
+            font-size: 10px;
+            color: #3a6a8a;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .cond-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #fff;
+            margin: 5px 0 3px;
+            line-height: 1;
+        }
+
+        .cond-sub {
+            font-size: 11px;
+            color: #3a6a8a;
+        }
+
+        /* Gust sub-label is slightly larger so the color-coded value is easy to scan */
+        .cc-wind-sub { font-size: 13px; }
+        .cc-wind-sub strong { font-size: 14px; }
+
+        /* Wind direction arrow */
+        .wind-arrow {
+            display: inline-block;
+            font-size: 20px;
+            line-height: 1;
+        }
+
+        /* Chart area */
+        .chart-area {
+            padding: 18px 22px 20px;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .chart-tabs {
+            display: flex;
+            gap: 6px;
+        }
+
+        .sun-info {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: #7aa8c8;
+            letter-spacing: 0.2px;
+        }
+
+        .sun-info .sun-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background: #0e1a28;
+            border: 1px solid #1a2e42;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+
+        .sun-info .sun-icon {
+            font-size: 13px;
+            line-height: 1;
+        }
+
+        .sun-info .sun-sunrise { color: #fbbf24; }
+        .sun-info .sun-sunset  { color: #a78bfa; }
+
+        .chart-tab {
+            padding: 5px 14px;
+            border-radius: 20px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chart-tab.active {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: white;
+        }
+
+        .chart-tab:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .chart-wrapper {
+            height: 285px;
+            position: relative;
+        }
+
+        /* Loading & Error */
+        .loading-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 48px 20px;
+            color: #3a6a8a;
+            gap: 12px;
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid #1e3048;
+            border-top-color: #1d4ed8;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .error-state {
+            margin: 16px 22px;
+            background: #2a1414;
+            border: 1px solid #4a2020;
+            border-radius: 10px;
+            padding: 14px 16px;
+            color: #ff8080;
+            font-size: 13px;
+        }
+
+        .stale-state {
+            margin: 32px 22px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            text-align: center;
+        }
+
+        .stale-state .stale-icon {
+            font-size: 32px;
+            line-height: 1;
+            opacity: 0.5;
+        }
+
+        .stale-state .stale-msg {
+            font-size: 14px;
+            font-weight: 600;
+            color: #c0a060;
+        }
+
+        .stale-state .stale-sub {
+            font-size: 12px;
+            color: #4a6a7a;
+        }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.75);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.open { display: flex; }
+
+        .modal {
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            padding: 28px;
+            width: 420px;
+            max-width: 94vw;
+        }
+
+        .modal h3 {
+            font-size: 17px;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .modal p {
+            font-size: 13px;
+            color: #4a7a9a;
+            margin-bottom: 22px;
+        }
+
+        .form-group { margin-bottom: 14px; }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #4a7a9a;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 8px;
+            color: #e0eaf4;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #1d4ed8;
+        }
+
+        .form-group input::placeholder { color: #2a4a6a; }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+
+        .btn-cancel { background: #1a2e42; color: #7a9ab0; flex: 1; }
+        .btn-cancel:hover { background: #1e3a52; }
+        .btn-add-confirm { background: #1d4ed8; color: white; flex: 1; }
+        .btn-add-confirm:hover { background: #2563eb; }
+
+        .modal-error {
+            background: #2a1414;
+            border: 1px solid #4a2020;
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: #ff8080;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }
+
+        .geo-hint {
+            font-size: 12px;
+            color: #2a5a7a;
+            margin-top: 6px;
+        }
+
+        .geo-hint a { color: #3a7aaa; }
+
+        /* Forecast next-peak bar — stretches edge-to-edge, items share width equally */
+        .forecast-peek {
+            display: flex;
+            gap: 6px;
+            padding: 10px 22px 0;
+        }
+
+        .peek-item {
+            flex: 1 1 0;
+            min-width: 0;
+            text-align: center;
+            padding: 7px 4px;
+            border-radius: 8px;
+            background: #0c1520;
+            border: 1px solid #1a2e42;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .peek-item:hover { border-color: #2a5a7a; background: #0f1a2e; }
+        .peek-item.active { border-color: #1d4ed8; background: #0f1e3a; box-shadow: inset 0 0 0 1px #1d4ed8; }
+
+        .peek-time { font-size: 10px; color: #3a6a8a; }
+        .peek-temp { font-size: 13px; font-weight: 700; color: #fff; margin: 2px 0; }
+        .peek-wind { font-size: 10px; color: #4a8ab0; }
+
+        /* Tiny hour badge inside each condition label — updates as user hovers */
+        .cond-time {
+            font-size: 9px;
+            color: #7dd3fc;
+            background: rgba(29, 78, 216, 0.18);
+            padding: 2px 6px;
+            border-radius: 10px;
+            margin-left: 6px;
+            font-weight: 600;
+            letter-spacing: 0;
+            text-transform: none;
+            vertical-align: 1px;
+        }
+
+        /* Full-width bar that holds the day tabs just above the location cards.
+           Stretches edge-to-edge inside the main column and centers its row. */
+        .day-tabs-bar {
+            margin: 22px 0 18px;
+            padding: 12px 18px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 14px;
+            display: flex;
+            justify-content: center;
+        }
+
+        /* Period / day toggle (Mon–Sun tabs) */
+        .period-toggle {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .period-btn {
+            padding: 8px 16px;
+            border-radius: 10px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 64px;
+            line-height: 1.2;
+        }
+
+        .period-btn .day-name { font-size: 13px; font-weight: 600; }
+        .period-btn .day-date { font-size: 11px; opacity: 0.7; margin-top: 1px; }
+
+        .period-btn:hover:not(.active):not(:disabled) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .period-btn.active {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .period-btn.active .day-date { opacity: 0.85; }
+
+        .period-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+            text-decoration: line-through;
+            text-decoration-color: #3a5a7a;
+        }
+
+        .period-btn:disabled:hover { border-color: #1e3048; color: #4a7a9a; }
+
+        /* Weekend tint — a subtle warm amber wash on Sat/Sun so the eye can
+           pick out the weekend column at a glance. Selected weekend days use
+           a saturated amber fill (instead of the weekday blue) so the warm
+           theme carries through into the active state as well. */
+        .period-btn.weekend {
+            background: rgba(251, 146, 60, 0.05);
+            border-color: rgba(251, 146, 60, 0.28);
+            color: #c99566;
+        }
+        .period-btn.weekend:hover:not(.active):not(:disabled) {
+            border-color: rgba(251, 146, 60, 0.55);
+            color: #e3b17f;
+            background: rgba(251, 146, 60, 0.1);
+        }
+        .period-btn.weekend.active {
+            background: #ea7a1f;         /* warm saturated amber */
+            border-color: #ea7a1f;
+            color: #fff;
+        }
+        .period-btn.weekend.active .day-date { opacity: 0.9; }
+
+        .model-switcher {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+
+        .model-switcher label {
+            font-size: 12px;
+            color: #4a7a9a;
+            white-space: nowrap;
+        }
+
+        .model-btn {
+            padding: 5px 12px;
+            border-radius: 6px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .model-btn.active {
+            background: #0f3460;
+            border-color: #1a5a9a;
+            color: #7dd3fc;
+            font-weight: 700;
+        }
+
+        .model-btn:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .model-dropdown { position: relative; }
+        .model-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            background: #111f30;
+            border: 1px solid #1e3a52;
+            border-radius: 8px;
+            padding: 4px;
+            z-index: 200;
+            min-width: 110px;
+            flex-direction: column;
+            gap: 2px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .model-dropdown-menu.open { display: flex; }
+        .model-dropdown-menu .model-btn { width: 100%; text-align: left; border-radius: 5px; }
+
+        .no-data-msg {
+            text-align: center;
+            color: #3a6a8a;
+            padding: 32px;
+            font-size: 13px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="header-left">
+        <h1>🌊 Bay Area Weather Dashboard</h1>
+        <p class="subtitle" id="updated-time">Initializing…</p>
+        <p class="subtitle" id="model-ref" style="color:#2a5a7a"></p>
+    </div>
+
+    <!-- Centre column: water-type switcher -->
+    <div class="water-switcher" id="water-switcher">
+        <button class="water-btn active" id="water-freshwater"
+                onclick="setLocationSet('freshwater', this)">
+            <span class="water-icon">🏞️</span>
+            <span>Freshwater</span>
+        </button>
+        <button class="water-btn" id="water-saltwater"
+                onclick="setLocationSet('saltwater', this)">
+            <span class="water-icon">🌊</span>
+            <span>Saltwater</span>
+        </button>
+    </div>
+
+    <!-- Right column: model switcher + actions -->
+    <div class="header-actions">
+        <div class="model-switcher">
+            <label>Model:</label>
+            <button class="model-btn active" id="btn-ecmwf-local" onclick="setModel('ecmwf-local', this)" title="ECMWF scraped daily from Windy — local file, no API call">ECMWF Local</button>
+            <button class="model-btn" id="btn-ecmwf" onclick="setModel('ecmwf', this)" title="ECMWF IFS via Open-Meteo API (~25 km)">ECMWF</button>
+            <!-- GFS + NAM tucked into a dropdown -->
+            <div class="model-dropdown" id="model-dropdown-wrapper">
+                <button class="model-btn" id="btn-more-models" onclick="toggleModelDropdown(event)" title="More models">More ▾</button>
+                <div class="model-dropdown-menu" id="model-dropdown-menu">
+                    <button class="model-btn" id="btn-gfs" onclick="setModel('gfs', this); closeModelDropdown()" title="NOAA GFS via Open-Meteo API (~13 km, 10-day)">GFS</button>
+                    <button class="model-btn" id="btn-namConus" onclick="setModel('namConus', this); closeModelDropdown()" title="NOAA NAM CONUS via Open-Meteo API (~12 km, 84h)">NAM</button>
+                </div>
+            </div>
+        </div>
+        <button class="btn btn-refresh" onclick="refreshAll()">↻ Refresh</button>
+        <button class="btn btn-primary" onclick="openModal()">+ Add Location</button>
+    </div>
+</header>
+
+<div class="main">
+
+    <!-- Summary -->
+    <div class="summary-section" id="summary-section">
+        <div class="section-title" onclick="toggleSummary()">
+            📊 Summary &amp; Analytics
+            <span class="section-chevron">▼</span>
+        </div>
+        <div class="summary-body" id="summary-body">
+            <div class="summary-grid" id="summary-grid">
+                <div class="loading-state" style="grid-column:1/-1; padding:16px">
+                    <div class="spinner"></div>
+                    <span style="font-size:13px">Loading summary…</span>
+                </div>
+            </div>
+            <!-- Stability Forecast — injected by renderStabilityForecast() -->
+            <div id="stability-forecast"></div>
+            <div id="recommendation-box"></div>
+            <div id="compare-strip" class="compare-strip"></div>
+        </div>
+    </div>
+
+    <!-- Day selector — full-width bar sitting right above the location cards -->
+    <div class="day-tabs-bar">
+        <div class="period-toggle" id="period-toggle">
+            <!-- Mon-Sun tabs are generated dynamically by renderDayTabs() -->
+        </div>
+    </div>
+
+    <!-- Cards -->
+    <div class="locations-grid" id="locations-grid"></div>
+
+</div>
+
+<!-- Add Location Modal -->
+<div class="modal-overlay" id="modal">
+    <div class="modal">
+        <h3>Add New Location</h3>
+        <p>Enter a name and the GPS coordinates. You can find coordinates at <a href="https://maps.google.com" target="_blank" style="color:#3a7aaa">maps.google.com</a> by right-clicking any point.</p>
+        <div id="modal-error" style="display:none" class="modal-error"></div>
+        <div class="form-group">
+            <label>Location Name</label>
+            <input type="text" id="m-name" placeholder="e.g. Half Moon Bay" />
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Latitude</label>
+                <input type="number" id="m-lat" placeholder="37.4636" step="0.0001" />
+            </div>
+            <div class="form-group">
+                <label>Longitude</label>
+                <input type="number" id="m-lon" placeholder="-122.4286" step="0.0001" />
+            </div>
+        </div>
+        <p class="geo-hint">Tip: Latitude for CA is ~37–38, Longitude is ~-121 to -122</p>
+        <div class="modal-actions">
+            <button class="btn btn-cancel" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-add-confirm" onclick="addLocation()">Add Location</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// We switched from Windy Point Forecast → Open-Meteo because Windy's free API
+// returns `temp-surface` as the model's skin/ground temperature (not 2m air
+// temperature) for every model. That's why temps oscillated 10°C every 3h and
+// didn't match windy.com's display. Open-Meteo exposes true 2m air temp
+// (temperature_2m), needs no API key, and supports multiple forecast models.
+const API_URL = 'https://api.open-meteo.com/v1/forecast';
+const FORECAST_DAYS = 15;                    // how many days of forecast to request + render
+// We also request 1 past day from the API. That matters because we use
+// `timezone: 'UTC'` — if we didn't, a late-evening PT user would see the API
+// window start at 00:00 UTC (= 5 PM PT), cutting off today's morning hours.
+// The extra past day gives us those PT-morning hours. Hence +1 day of steps.
+const HOURS_SHOWN   = (FORECAST_DAYS + 1) * 8 + 4;  // 3h cadence = 8 steps/day, small buffer
+
+// Map our UI model keys to Open-Meteo model identifiers
+const OPEN_METEO_MODELS = {
+    'gfs':         'gfs_seamless',    // NOAA GFS (global, ~13km)
+    'namConus':    'ncep_nam_conus',  // NOAA NAM North America (~12km, 84h range)
+    'ecmwf':       'ecmwf_ifs025',   // ECMWF IFS via API (~25km, widely regarded as best overall)
+    'ecmwf-local': null              // ECMWF scraped from Windy — handled by local file, never calls API
+};
+
+// Two curated location sets, switchable via the top-of-page Freshwater/Saltwater
+// toggle. IDs are namespaced (1–99 fresh, 100+ salt) so cache entries don't
+// collide when the user toggles back and forth.
+const LOCATION_SETS = {
+    freshwater: [
+        { id: 1, name: 'Belmont',           label: 'Belmont, CA 94002',             lat: 37.504,  lon: -122.301 },
+        { id: 2, name: 'Almaden Reservoir', label: 'Almaden Reservoir, CA',         lat: 37.163,  lon: -121.836 },
+        { id: 3, name: 'Lake Del Valle',    label: 'Lake Del Valle, CA (Livermore)', lat: 37.591,  lon: -121.737 },
+        { id: 4, name: 'Uvas Reservoir',    label: 'Uvas Reservoir, CA',            lat: 37.073,  lon: -121.701 },
+        { id: 5, name: 'Coyote Reservoir',  label: 'Coyote Reservoir, CA',          lat: 37.096,  lon: -121.540 }
+    ],
+    saltwater: [
+        { id: 101, name: 'Ocean Beach',        label: 'Ocean Beach, San Francisco', lat: 37.7594, lon: -122.5107 },
+        { id: 102, name: 'Morro Rock',         label: 'Morro Rock, Morro Bay',      lat: 35.3687, lon: -120.8687 },
+        { id: 103, name: 'San Gregorio Beach', label: 'San Gregorio State Beach',   lat: 37.3244, lon: -122.4006 }
+    ]
+};
+
+let activeLocationSet = localStorage.getItem('wx-locset') || 'freshwater';
+if (!LOCATION_SETS[activeLocationSet]) activeLocationSet = 'freshwater';
+let locations = LOCATION_SETS[activeLocationSet].map(l => ({ ...l }));
+
+// Restore cached weather + fetch timestamps from localStorage so rapid reloads
+// don't re-hit the API (and don't flicker with slightly different API values).
+let weatherData = {};
+let weatherFetchedAt = {};   // locId → Date.now() timestamp of last successful fetch
+// v2 keys — bumped when we switched from Windy → Open-Meteo so stale data from
+// the old API (which returned skin temps) is automatically ignored.
+// v3 — bumped from v2 when cloud_cover + weather_code were added to processData.
+// v4 — bumped when sunrise / sunset daily data was added.
+// v5 — bumped when the forecast window grew from 10 → 15 days; older caches
+// would show "no data" for the extra tabs until they expired naturally.
+// v6 — bumped when we started requesting past_days=1 so today's PT-morning
+// hours aren't missing in late-evening sessions.
+const CACHE_DATA_KEY    = 'wx-data-v6';
+const CACHE_FETCHED_KEY = 'wx-fetchedAt-v6';
+try {
+    weatherData      = JSON.parse(localStorage.getItem(CACHE_DATA_KEY)    || '{}');
+    weatherFetchedAt = JSON.parse(localStorage.getItem(CACHE_FETCHED_KEY) || '{}');
+    // Clean up older cache generations
+    localStorage.removeItem('wx-data');        localStorage.removeItem('wx-fetchedAt');
+    localStorage.removeItem('wx-data-v2');     localStorage.removeItem('wx-fetchedAt-v2');
+    localStorage.removeItem('wx-data-v3');     localStorage.removeItem('wx-fetchedAt-v3');
+    localStorage.removeItem('wx-data-v4');     localStorage.removeItem('wx-fetchedAt-v4');
+    localStorage.removeItem('wx-data-v5');     localStorage.removeItem('wx-fetchedAt-v5');
+} catch (e) {
+    console.warn('Could not restore cache from localStorage:', e);
+    weatherData = {}; weatherFetchedAt = {};
+}
+let chartInstances = {};
+// Per-location filtered view data keyed by loc.id, used by the hover handler to
+// update card header values + peek highlight as the user moves across the chart.
+let filteredDataCache = {};
+let nextId = 4;
+// activePeriod is now a PT date string ("YYYY-MM-DD"). Defaults to today.
+let activePeriod = null;  // set by renderDayTabs() / init()
+let activeModel  = localStorage.getItem('wx-model-v2') || 'ecmwf-local'; // v2 resets default to ecmwf-local
+// Which chart is shown inside every card — 'temp' or 'wind'. Switching on one
+// card applies to all cards (cross-card tab sync) and is persisted.
+let activeChartTab = localStorage.getItem('wx-chart-tab') || 'temp';
+// NOTE: For the Windy Point Forecast free API, `temp-surface` is interpreted
+// differently per model:
+//   • GFS   → 2m air temperature (what a thermometer reads) ✓
+//   • NAM   → skin/ground temperature (can swing 10°C in 3h as sun hits the surface) ✗
+// That's why NAM values oscillate wildly and don't match windy.com's display.
+// windy.com post-processes NAM skin-temp into 2m air-temp internally; the free
+// API doesn't expose that derived field. Default to GFS for reliable air temps.
+const CACHE_MINUTES = 30;    // don't re-fetch if data is younger than this
+
+// Persist weather cache to localStorage. Called after every successful fetch.
+function persistCache() {
+    try {
+        localStorage.setItem(CACHE_DATA_KEY,    JSON.stringify(weatherData));
+        localStorage.setItem(CACHE_FETCHED_KEY, JSON.stringify(weatherFetchedAt));
+    } catch (e) {
+        // Quota exceeded or storage disabled — fall back silently
+        console.warn('Could not persist cache to localStorage:', e);
+    }
+}
+
+// ── Unit helpers ──────────────────────────────────────────────────────────────
+const kToC  = k  => (k - 273.15).toFixed(1);
+const msToMs = ms => ms.toFixed(1);
+const windDeg = (u, v) => (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+const degToCompass = d => ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(d/22.5)%16];
+
+// ── Period / timezone helpers ──────────────────────────────────────────────────
+const PT = 'America/Los_Angeles';
+
+// Returns ISO date string "YYYY-MM-DD" in PT for a UTC timestamp
+function ptDateStr(ts) {
+    return new Date(ts).toLocaleDateString('en-CA', { timeZone: PT });
+}
+
+// Returns PT weekday 0=Sun … 6=Sat
+function ptWeekday(ts) {
+    const wd = new Date(ts).toLocaleDateString('en-US', { timeZone: PT, weekday: 'short' });
+    return { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 }[wd] ?? 0;
+}
+
+// Returns "YYYY-MM-DD" offset by N calendar days (using noon UTC to dodge DST edge cases)
+function ptDateStrOffset(days) {
+    const today = ptDateStr(Date.now());            // e.g. "2026-04-21"
+    const [y, m, d] = today.split('-').map(Number);
+    const target = new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
+    return ptDateStr(target.getTime());
+}
+
+// Slice the full processed data to only timestamps matching the active day
+// (period is a PT calendar date string like "2026-04-21"). We always return
+// the full day — including hours that have already passed on today's view —
+// so the chart renders a complete 24h picture regardless of wall-clock time.
+// The "Now" highlight tracks the current hour separately via defaultIndex().
+function filterByPeriod(d, period) {
+    if (!period) return null;
+
+    const idx = d.timestamps.reduce((acc, ts, i) => {
+        if (ptDateStr(ts) === period) acc.push(i);
+        return acc;
+    }, []);
+    if (!idx.length) return null;
+
+    // Sunrise / sunset for the active day, if we have daily data for it.
+    const sunForDay = (d.sunByDate && d.sunByDate[period]) || {};
+
+    return {
+        timestamps: idx.map(i => d.timestamps[i]),
+        windSpeed:  idx.map(i => d.windSpeed[i]),
+        windDir:    idx.map(i => d.windDir[i]),
+        gusts:      idx.map(i => d.gusts[i]),
+        temp:       idx.map(i => d.temp[i]),
+        precip:     idx.map(i => d.precip[i]),
+        rh:         idx.map(i => d.rh[i]),
+        cloud:      idx.map(i => d.cloud      ? d.cloud[i]      : null),
+        wcode:      idx.map(i => d.wcode      ? d.wcode[i]      : null),
+        pressure:   idx.map(i => d.pressure   ? d.pressure[i]   : null),
+        cloud_base: idx.map(i => d.cloud_base ? d.cloud_base[i] : null),
+        uv_index:   idx.map(i => d.uv_index   ? d.uv_index[i]   : null),
+        sunrise:    sunForDay.sunrise || null,
+        sunset:     sunForDay.sunset  || null
+    };
+}
+
+// Set active day (period = PT date string), update button states, re-render everything
+function setActivePeriod(period, btn) {
+    activePeriod = period;
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    // Re-render all loaded cards and summary
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    renderSummary();
+}
+
+// Build the list of days in the current forecast window — today plus the
+// next FORECAST_DAYS - 1 days in PT. We no longer show past days since we
+// don't fetch history. Returns [{ dateStr, weekday, dayNum, isToday }, ...].
+function getForecastDays() {
+    const todayStr = ptDateStr(Date.now());
+    const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const out = [];
+    for (let i = 0; i < FORECAST_DAYS; i++) {
+        const dateStr = ptDateStrOffset(i);
+        const [y, m, day] = dateStr.split('-').map(Number);
+        // weekday of this date (use UTC noon to dodge DST boundary issues,
+        // same pattern as ptDateStrOffset itself).
+        const refUtc = Date.UTC(y, m - 1, day, 12, 0, 0);
+        const wd = ptWeekday(refUtc);
+        out.push({
+            dateStr,
+            weekday:   names[wd],
+            dayNum:    day,
+            isToday:   dateStr === todayStr,
+            isWeekend: wd === 0 || wd === 6          // Sat + Sun
+        });
+    }
+    return out;
+}
+
+// Render the day-picker bar above the location cards. Today is highlighted
+// and labeled "Today"; the rest show a weekday abbreviation + day number.
+// Keeps activePeriod in sync when it points to a date we no longer render.
+function renderDayTabs() {
+    const toggle = document.getElementById('period-toggle');
+    if (!toggle) return;
+    const days = getForecastDays();
+    const todayStr = days[0].dateStr;
+    const lastStr  = days[days.length - 1].dateStr;
+
+    // If activePeriod is unset, in the past, or past the end of our window,
+    // snap it back to today so we always have a valid selection.
+    if (!activePeriod || activePeriod < todayStr || activePeriod > lastStr) {
+        activePeriod = todayStr;
+    }
+
+    toggle.innerHTML = days.map(d => {
+        const active  = d.dateStr === activePeriod ? 'active' : '';
+        const weekend = d.isWeekend ? 'weekend' : '';
+        const label   = d.isToday
+            ? `<span class="day-name">Today</span><span class="day-date">${d.weekday} ${d.dayNum}</span>`
+            : `<span class="day-name">${d.weekday}</span><span class="day-date">${d.dayNum}</span>`;
+        return `<button class="period-btn ${active} ${weekend}"
+                   onclick="setActivePeriod('${d.dateStr}', this)"
+                   title="${d.dateStr}">${label}</button>`;
+    }).join('');
+}
+
+// Switch forecast model and re-fetch all locations (cache is model-specific)
+function toggleModelDropdown(e) {
+    e.stopPropagation();
+    document.getElementById('model-dropdown-menu').classList.toggle('open');
+}
+function closeModelDropdown() {
+    document.getElementById('model-dropdown-menu').classList.remove('open');
+}
+// Close dropdown when clicking anywhere outside it
+document.addEventListener('click', () => closeModelDropdown());
+
+async function setModel(model, btn) {
+    if (model === activeModel) return;
+    activeModel = model;
+    localStorage.setItem('wx-model-v2', model);
+    document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    // If selected model is inside the dropdown, also highlight the More button
+    const dropdownModels = ['gfs', 'namConus'];
+    const moreBtn = document.getElementById('btn-more-models');
+    if (dropdownModels.includes(model)) {
+        if (moreBtn) { moreBtn.classList.add('active'); moreBtn.textContent = (btn?.textContent || 'More') + ' ▾'; }
+    } else {
+        if (moreBtn) { moreBtn.classList.remove('active'); moreBtn.textContent = 'More ▾'; }
+    }
+    // Clear cache — different model, different data (and clear persisted copy)
+    weatherFetchedAt = {};
+    weatherData = {};
+    persistCache();
+    await refreshAll(true);
+}
+
+// Swap between the Freshwater and Saltwater location sets. Tear down any
+// existing cards + chart instances, swap the `locations` array, then rebuild.
+// Cached data stays keyed by location id so switching back is near-instant.
+async function setLocationSet(setName, btn) {
+    if (!LOCATION_SETS[setName] || setName === activeLocationSet) return;
+    activeLocationSet = setName;
+    localStorage.setItem('wx-locset', setName);
+
+    document.querySelectorAll('.water-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+
+    // Destroy all current Chart.js instances so they don't leak (canvases get
+    // thrown away when we wipe the grid below anyway, but Chart keeps a ref).
+    Object.values(chartInstances).forEach(c => { try { c.destroy(); } catch (e) {} });
+    chartInstances = {};
+    filteredDataCache = {};
+
+    // Swap the active location list and rebuild the grid from scratch.
+    locations = LOCATION_SETS[setName].map(l => ({ ...l }));
+    const grid = document.getElementById('locations-grid');
+    if (grid) grid.innerHTML = '';
+    locations.forEach(createCard);
+
+    // Render whatever's already cached instantly, then (re)fetch anything stale.
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    renderSummary();
+    await Promise.all(locations.map(loc => loadLocation(loc, false)));
+}
+
+
+function fmtHour(ts) {
+    const d = new Date(ts);
+    const h = d.toLocaleString('en-US', { hour: 'numeric', hour12: true, timeZone: 'America/Los_Angeles' });
+    if (d.getHours() === 0) {
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+    }
+    return h;
+}
+
+// ── API (Open-Meteo) ─────────────────────────────────────────────────────────
+async function fetchWeather(loc) {
+    const model = OPEN_METEO_MODELS[activeModel] || OPEN_METEO_MODELS.ecmwf;
+    const params = new URLSearchParams({
+        latitude:  loc.lat,
+        longitude: loc.lon,
+        hourly:    'temperature_2m,dew_point_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,relative_humidity_2m,cloud_cover,weather_code,pressure_msl',
+        // daily sunrise + sunset — used to shade night hours (moon glyph when
+        // the sky is clear) and draw vertical dashed bars on the temp chart.
+        daily:     'sunrise,sunset',
+        wind_speed_unit: 'ms',
+        timezone:  'UTC',          // we'll convert to PT on display
+        forecast_days: FORECAST_DAYS,
+        // Pull in the previous UTC day so that, on late-evening PT wall clocks
+        // (when UTC has already rolled over), today's PT morning hours are
+        // still present in the hourly window. filterByPeriod() then slices by
+        // PT calendar date, so these extra hours only surface when relevant.
+        past_days: 1,
+        models:    model
+    });
+    const res = await fetch(`${API_URL}?${params}`);
+    if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`API ${res.status}: ${txt.slice(0,200)}`);
+    }
+    return res.json();
+}
+
+// Turn an Open-Meteo hourly response into the internal shape the rest of the
+// dashboard expects. Temperatures are stored in Kelvin to keep kToC() happy —
+// Open-Meteo returns °C, so we add 273.15 then kToC will subtract it back.
+function processData(raw) {
+    const h = raw && raw.hourly;
+    if (!h || !h.time) throw new Error('Open-Meteo response missing hourly data');
+
+    // Time strings are in UTC (timezone=UTC), format "YYYY-MM-DDTHH:MM" without Z.
+    // Append Z to force UTC interpretation regardless of browser timezone.
+    const allTs    = h.time.map(s => Date.parse(s + 'Z'));
+    const allTemp  = h.temperature_2m;
+    const allWind  = h.wind_speed_10m;
+    const allDir   = h.wind_direction_10m;
+    const allGust  = h.wind_gusts_10m;
+    const allPrcp  = h.precipitation     || new Array(allTs.length).fill(0);
+    const allRh    = h.relative_humidity_2m || new Array(allTs.length).fill(null);
+    const allCloud = h.cloud_cover          || new Array(allTs.length).fill(null);
+    const allWcode = h.weather_code         || new Array(allTs.length).fill(null);
+    const allPress = h.pressure_msl         || new Array(allTs.length).fill(null);
+    const allDewp  = h.dew_point_2m         || new Array(allTs.length).fill(null);
+    // Cloud base estimated from Lifted Condensation Level: (T - Td) × 400 ft per °C.
+    // This approximates the base of convective cloud well for maritime/coastal air.
+    const allCbase = allTemp.map((t, i) => {
+        const td = allDewp[i];
+        if (t == null || td == null) return null;
+        const lcl = Math.round((t - td) * 400);
+        return lcl > 0 ? lcl : null;
+    });
+
+    // Subsample to 3-hour cadence (matches the existing UX: 2 AM, 5 AM, 8 AM …)
+    // We pick indices where the UTC hour is a multiple of 3 so the display
+    // lands on clean 3-hour boundaries (9, 12, 15, 18, 21, 0, 3, 6 UTC = every
+    // synoptic time).
+    const idx = [];
+    for (let i = 0; i < allTs.length; i++) {
+        if (new Date(allTs[i]).getUTCHours() % 3 === 0) idx.push(i);
+        if (idx.length >= HOURS_SHOWN) break;
+    }
+
+    // Diagnostics — same flavor as before, so the 🔍 debug button still works
+    console.log('[Open-Meteo] model key:', activeModel, '→', OPEN_METEO_MODELS[activeModel]);
+    console.log('[Open-Meteo] elevation:', raw.elevation, 'm · tz:', raw.timezone);
+    console.log('[Open-Meteo] hourly keys:', Object.keys(h).join(', '));
+    console.log('[Open-Meteo] hourly length:', allTs.length, '· subsampled:', idx.length);
+    if (idx.length) {
+        console.log('[Open-Meteo] first subsampled ts (UTC):', new Date(allTs[idx[0]]).toUTCString());
+    }
+
+    // Build a lookup of sunrise / sunset moments keyed by the PT calendar date
+    // on which they occur. Sunset in SF (e.g. 7:50 PM PT on Apr 21) arrives as
+    // UTC "2026-04-22T02:50" — ptDateStr() puts it back on "2026-04-21".
+    const sunByDate = {};
+    const daily = raw && raw.daily;
+    if (daily && daily.time) {
+        const dSunrise = daily.sunrise || [];
+        const dSunset  = daily.sunset  || [];
+        for (let i = 0; i < daily.time.length; i++) {
+            const sr = dSunrise[i] ? Date.parse(dSunrise[i] + 'Z') : null;
+            const ss = dSunset[i]  ? Date.parse(dSunset[i]  + 'Z') : null;
+            if (sr) {
+                const key = ptDateStr(sr);
+                sunByDate[key] = sunByDate[key] || {};
+                sunByDate[key].sunrise = sr;
+            }
+            if (ss) {
+                const key = ptDateStr(ss);
+                sunByDate[key] = sunByDate[key] || {};
+                sunByDate[key].sunset = ss;
+            }
+        }
+    }
+
+    return {
+        timestamps: idx.map(i => allTs[i]),
+        windSpeed:  idx.map(i => allWind[i]),
+        windDir:    idx.map(i => allDir[i]),
+        gusts:      idx.map(i => allGust[i]),
+        // Store °C + 273.15 so kToC() in the render code produces the right °C again.
+        temp:       idx.map(i => (allTemp[i] ?? 0) + 273.15),
+        precip:     idx.map(i => allPrcp[i]  ?? 0),
+        rh:         idx.map(i => allRh[i]    ?? 0),
+        cloud:      idx.map(i => allCloud[i] ?? null),   // % cloud cover 0–100
+        wcode:      idx.map(i => allWcode[i] ?? null),   // WMO weather code
+        pressure:   idx.map(i => allPress[i] != null ? Math.round(allPress[i] * 0.750062) : null),  // mmHg MSL
+        cloud_base: idx.map(i => allCbase[i] ?? null),   // ft AGL (LCL estimate)
+        uv_index:   new Array(idx.length).fill(null),   // filled by mergeUVOnly()
+        sunByDate:  sunByDate                             // { 'YYYY-MM-DD': { sunrise, sunset } }
+    };
+}
+
+// ── Local ECMWF file loader ───────────────────────────────────────────────────
+// Approximate sunrise and sunset (UTC ms) for a given date and lat/lon using
+// the NOAA solar calculator algorithm (accurate to ~5 min for mid-latitudes).
+// Returns { sunrise, sunset } or { sunrise: null, sunset: null } on failure.
+function approxSunTimes(lat, lon, dateStr) {
+    try {
+        const [y, m, d] = dateStr.split('-').map(Number);
+        const R = Math.PI / 180;
+        // Julian Day Number (noon)
+        const a  = Math.floor((14 - m) / 12);
+        const yr = y + 4800 - a, mo = m + 12*a - 3;
+        const JD = d + Math.floor((153*mo+2)/5) + 365*yr + Math.floor(yr/4) - Math.floor(yr/100) + Math.floor(yr/400) - 32045 + 0.5;
+        const T  = (JD - 2451545.0) / 36525.0;
+        // Sun's position
+        const L0  = ((280.46646 + T*(36000.76983 + T*0.0003032)) % 360 + 360) % 360;
+        const M   = 357.52911 + T*(35999.05029 - 0.0001537*T);
+        const e   = 0.016708634 - T*(0.000042037 + 0.0000001267*T);
+        const Mr  = M * R;
+        const C   = (1.914602 - T*(0.004817 + 0.000014*T))*Math.sin(Mr) +
+                    (0.019993 - 0.000101*T)*Math.sin(2*Mr) + 0.000289*Math.sin(3*Mr);
+        const om  = 125.04 - 1934.136*T;
+        const lam = L0 + C - 0.00569 - 0.00478*Math.sin(om*R);
+        const e0  = 23.0 + (26.0 + (21.448 - T*(46.815 + T*(0.00059 - T*0.001813)))/60)/60;
+        const eps = e0 + 0.00256*Math.cos(om*R);
+        const sinDec = Math.sin(eps*R) * Math.sin(lam*R);
+        const dec    = Math.asin(sinDec);
+        // Equation of time (minutes)
+        const yS  = Math.tan(eps*R/2) ** 2;
+        const EqT = 4 * (yS*Math.sin(2*L0*R) - 2*e*Math.sin(Mr) +
+                         4*e*yS*Math.sin(Mr)*Math.cos(2*L0*R) -
+                         0.5*yS**2*Math.sin(4*L0*R) - 1.25*e**2*Math.sin(2*Mr)) * (180/Math.PI);
+        // Hour angle at horizon (zenith = 90°50')
+        const cosHA = (Math.cos(90.833*R) - sinDec*Math.sin(lat*R)) / (Math.cos(lat*R)*Math.cos(dec));
+        if (Math.abs(cosHA) > 1) return { sunrise: null, sunset: null };
+        const HA = Math.acos(cosHA) * (180/Math.PI);
+        // Solar noon in UTC minutes, then offset ±HA
+        const noon = 720 - 4*lon - EqT;
+        const srMin = noon - 4*HA, ssMin = noon + 4*HA;
+        return {
+            sunrise: Date.UTC(y, m-1, d) + srMin * 60000,
+            sunset:  Date.UTC(y, m-1, d) + ssMin * 60000
+        };
+    } catch (e) {
+        return { sunrise: null, sunset: null };
+    }
+}
+
+// Converts one entry from window.FORECAST_DATA.locations into the same internal
+// shape that processData() returns, so all downstream rendering code works as-is.
+function processLocalData(entry) {
+    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [], pressure = [];
+    // PDT = UTC-7, PST = UTC-8. Detect from the generated timestamp if present,
+    // otherwise default to -7 (ECMWF task runs in summer/spring).
+    const tzOffset = 7; // hours behind UTC
+
+    // Build sunrise/sunset lookup for each forecast day so the sky strip renders
+    // moon glyphs for night hours (2 AM, 5 AM, late PM) rather than ☀ all day.
+    const sunByDate = {};
+    for (const day of (entry.forecast || [])) {
+        const sun = approxSunTimes(entry.lat, entry.lon, day.date);
+        if (sun.sunrise && sun.sunset) sunByDate[day.date] = sun;
+    }
+
+    for (const day of (entry.forecast || [])) {
+        const [yr, mo, dy] = day.date.split('-').map(Number);
+        const hours = day.hours_pdt || [];
+        for (let i = 0; i < hours.length; i++) {
+            const m = hours[i].match(/^(\d{1,2})(AM|PM)$/i);
+            if (!m) continue;
+            let h = parseInt(m[1]);
+            const ampm = m[2].toUpperCase();
+            if (ampm === 'PM' && h !== 12) h += 12;
+            if (ampm === 'AM' && h === 12) h = 0;
+            // Convert local PT hour → UTC
+            const utcH = h + tzOffset;
+            timestamps.push(Date.UTC(yr, mo - 1, dy + Math.floor(utcH / 24), utcH % 24));
+            // Store as Kelvin-style (°C + 273.15) so kToC() in the render code works unchanged
+            temp.push(((day.temp_c  || [])[i] ?? 0) + 273.15);
+            windSpeed.push((day.wind_ms   || [])[i] ?? 0);
+            windDir.push((day.wind_dir    || [])[i] ?? 0);
+            gusts.push((day.gusts_ms     || [])[i] ?? 0);
+            precip.push((day.rain_mm     || [])[i] ?? 0);
+            // Sky conditions — derived from Windy ECMWF pictocodes converted to
+            // WMO codes + cloud-cover % so weatherGlyph() and cloudBg() work as-is.
+            cloud.push((day.cloud_pct      || [])[i] ?? null);
+            wcode.push((day.wmo_code       || [])[i] ?? null);
+            pressure.push((day.pressure_mmhg || [])[i] ?? null);  // already mmHg
+        }
+    }
+    const n = timestamps.length;
+    return {
+        timestamps, windSpeed, windDir, gusts, temp, precip,
+        // rh, cloud_base, uv_index are null here — filled by mergeSupplementary()
+        rh:         new Array(n).fill(null),
+        cloud,
+        wcode,
+        pressure,
+        cloud_base: new Array(n).fill(null),
+        uv_index:   new Array(n).fill(null),
+        sunByDate,
+        _source:    'local-ecmwf'
+    };
+}
+
+// Update the model/source subtitle in the header for the first location.
+function updateSourceBadge(loc) {
+    if (!loc || loc.id !== locations[0].id) return;
+    const fd = window.FORECAST_DATA;
+    if (!fd) return;
+    const d = fd.generated ? new Date(fd.generated) : null;
+    const when = d
+        ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit' })
+        : 'local file';
+    document.getElementById('model-ref').textContent =
+        `Source: ECMWF Local (Windy) · Updated ${when}`;
+}
+
+// Render the stale / missing-data empty state into a location card.
+// ageDays === Infinity means no forecast-data.js file was found at all.
+function showStaleState(loc, ageDays) {
+    const body = document.getElementById(`body-${loc.id}`);
+    if (!body) return;
+    const missing  = !isFinite(ageDays);
+    const daysText = missing ? 'No forecast file found'
+                             : `Last update: ${Math.floor(ageDays)} day${Math.floor(ageDays) !== 1 ? 's' : ''} ago`;
+    body.innerHTML = `
+        <div class="stale-state">
+            <div class="stale-icon">⏱</div>
+            <div class="stale-msg">Run the parsing, data is outdated.</div>
+            <div class="stale-sub">${daysText}</div>
+        </div>`;
+    // Update header badge once (only for the first card)
+    if (loc.id === locations[0].id) {
+        document.getElementById('model-ref').textContent =
+            missing ? 'No local forecast file — run the scheduled task'
+                    : `Local data is ${Math.floor(ageDays)}d old — run the scheduled task to refresh`;
+    }
+}
+
+// ── Render helpers ────────────────────────────────────────────────────────────
+// Continuous color-temperature scale: deep indigo → blue → cyan → pale yellow
+// → amber → orange → red → crimson. Anchored so ~30°C reads as orange (the
+// user's reference). Linearly interpolates between stops in RGB space so the
+// per-segment gradients on the temp line glide smoothly through the spectrum.
+const TEMP_COLOR_STOPS = [
+    { t: -15, c: [ 67,  56, 202] },   // deep indigo
+    { t:  -5, c: [ 59, 130, 246] },   // blue
+    { t:   5, c: [ 56, 189, 248] },   // sky
+    { t:  12, c: [125, 211, 252] },   // light sky
+    { t:  18, c: [253, 224,  71] },   // pale yellow (transition)
+    { t:  25, c: [245, 158,  11] },   // amber
+    { t:  30, c: [249, 115,  22] },   // orange ← user's reference
+    { t:  36, c: [239,  68,  68] },   // red
+    { t:  42, c: [153,  27,  27] }    // deep crimson
+];
+function tempColor(c) {
+    if (c == null || isNaN(c)) return '#94a3b8';
+    const stops = TEMP_COLOR_STOPS;
+    if (c <= stops[0].t)              return `rgb(${stops[0].c.join(',')})`;
+    if (c >= stops[stops.length-1].t) return `rgb(${stops[stops.length-1].c.join(',')})`;
+    for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1];
+        if (c >= a.t && c <= b.t) {
+            const f = (c - a.t) / (b.t - a.t);
+            const r  = Math.round(a.c[0] + (b.c[0] - a.c[0]) * f);
+            const g  = Math.round(a.c[1] + (b.c[1] - a.c[1]) * f);
+            const bl = Math.round(a.c[2] + (b.c[2] - a.c[2]) * f);
+            return `rgb(${r},${g},${bl})`;
+        }
+    }
+    return '#94a3b8';
+}
+// Wind / gust color bands (m/s):
+//   0–3   light blue (calm, matches cold-temp sky)
+//   3–6   green      (ideal for bass/trout topwater)
+//   6–8   yellow     (breezy)
+//   8–11  orange     (blowy, choppy surface)
+//   11–14 red        (small-craft advisory territory)
+//   14+   purple     (dangerous / stay ashore)
+function windColor(ms) {
+    if (ms == null || isNaN(ms)) return '#94a3b8';
+    return ms >= 14 ? '#a855f7'
+         : ms >= 11 ? '#ef4444'
+         : ms >= 8  ? '#f97316'
+         : ms >= 6  ? '#facc15'
+         : ms >= 3  ? '#4ade80'
+         :            '#7dd3fc';
+}
+
+// Map a WMO weather code + cloud-cover percentage to a Unicode weather glyph.
+// WMO codes come from Open-Meteo and cover clear skies through thunderstorms.
+// When the weather_code is missing we fall back to cloud-cover-only glyphs.
+// If `isNight` is true, swap the sun glyph for a moon so post-sunset hours
+// don't look misleadingly sunny.
+function weatherGlyph(code, cloudPct, isNight = false) {
+    if (code != null) {
+        if (code === 0)  return isNight ? '🌙' : '☀';
+        if (code === 1)  return isNight ? '🌙' : '🌤';
+        if (code === 2)  return isNight ? '☁' : '⛅';
+        if (code === 3)  return '☁';
+        if (code === 45 || code === 48) return '🌫';
+        if (code >= 51 && code <= 57)   return '🌦';
+        if (code >= 61 && code <= 67)   return '🌧';
+        if (code >= 71 && code <= 77)   return '🌨';
+        if (code >= 80 && code <= 82)   return '🌧';
+        if (code >= 85 && code <= 86)   return '🌨';
+        if (code >= 95)                 return '⛈';
+    }
+    if (cloudPct == null) return '';
+    if (cloudPct < 10) return isNight ? '🌙' : '☀';
+    if (cloudPct < 40) return isNight ? '🌙' : '🌤';
+    if (cloudPct < 75) return isNight ? '☁' : '⛅';
+    return '☁';
+}
+
+// Format a sunrise / sunset pair into the small pill row shown where the temp
+// chart legend used to sit. Returns an empty string when we don't have daily
+// data for the active day, so the header collapses cleanly.
+function renderSunInfo(sunrise, sunset) {
+    const fmt = (ts) => ts ? new Date(ts).toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles'
+    }) : '--';
+    if (!sunrise && !sunset) return '';
+    return `
+        <span class="sun-item sun-sunrise" title="Sunrise (local time)">
+            <span class="sun-icon">☀</span>${fmt(sunrise)}
+        </span>
+        <span class="sun-item sun-sunset" title="Sunset (local time)">
+            <span class="sun-icon">🌙</span>${fmt(sunset)}
+        </span>`;
+}
+
+// Background color for a cloud-cover cell — pale warm when sunny, shifting to
+// cool grays as cloudiness increases, so the strip reads like a sky gradient.
+function cloudBg(pct) {
+    if (pct == null) return '#152236';
+    if (pct < 15) return 'rgba(251, 191, 36, 0.28)';   // sunny — warm glow
+    if (pct < 35) return 'rgba(203, 213, 225, 0.18)';  // mostly clear
+    if (pct < 60) return 'rgba(148, 163, 184, 0.35)';  // partly cloudy
+    if (pct < 85) return 'rgba(100, 116, 139, 0.55)';  // mostly cloudy
+    return 'rgba(71, 85, 105, 0.85)';                  // overcast
+}
+
+function createCard(loc) {
+    const grid = document.getElementById('locations-grid');
+    const card = document.createElement('div');
+    card.className = 'location-card';
+    card.id = `card-${loc.id}`;
+    card.innerHTML = `
+        <div class="card-header">
+            <div>
+                <h3>${loc.name}<span class="cond-time card-time" data-loc-id="${loc.id}"></span></h3>
+                <div class="loc-label">${loc.label} &nbsp;·&nbsp; ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}</div>
+            </div>
+            <div class="card-menu" data-loc-id="${loc.id}">
+                <button class="card-menu-btn" onclick="toggleCardMenu(${loc.id}, event)" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
+                <div class="card-menu-dropdown" id="card-menu-${loc.id}" role="menu">
+                    <button class="card-menu-item" role="menuitem" onclick="debugDump(${loc.id}); closeCardMenus()"><span class="menu-icon">🔍</span>Debug (dump to console)</button>
+                    <button class="card-menu-item danger" role="menuitem" onclick="closeCardMenus(); removeLocation(${loc.id})"><span class="menu-icon">✕</span>Remove location</button>
+                </div>
+            </div>
+        </div>
+        <div id="body-${loc.id}">
+            <div class="loading-state"><div class="spinner"></div><span style="font-size:13px">Loading…</span></div>
+        </div>`;
+    grid.appendChild(card);
+}
+
+function populateCard(loc, rawD) {
+    const body = document.getElementById(`body-${loc.id}`);
+    if (!body) return;
+
+    const d = filterByPeriod(rawD, activePeriod);
+    if (!d) {
+        delete filteredDataCache[loc.id];
+        body.innerHTML = `<div class="no-data-msg">No forecast data available for this period yet.<br>Try a closer date or check back soon.</div>`;
+        return;
+    }
+    filteredDataCache[loc.id] = d;
+
+    // Forecast peek strip — stretches edge-to-edge across the card, one tile per
+    // 3h step. Hovering a tile updates the header to match that hour. The
+    // "default" highlighted tile targets 2 PM PT (the midday step) since that
+    // answers the common "what's it going to feel like this afternoon?" case.
+    const defaultIdx = defaultIndex(d);
+    let peekHTML = '';
+    const peekCount = Math.min(8, d.timestamps.length);
+    for (let i = 0; i < peekCount; i++) {
+        const tF_i = parseFloat(kToC(d.temp[i]));
+        const w_i  = parseFloat(msToMs(d.windSpeed[i]));
+        peekHTML += `<div class="peek-item${i === defaultIdx ? ' active' : ''}" data-idx="${i}"
+            onmouseenter="syncHover(${loc.id}, ${i})"
+            onmouseleave="resetHoverAll()">
+            <div class="peek-time">${fmtHour(d.timestamps[i])}</div>
+            <div class="peek-temp" style="color:${tempColor(tF_i)}">${tF_i}°</div>
+            <div class="peek-wind">${w_i} m/s</div>
+        </div>`;
+    }
+
+    body.innerHTML = `
+        <div class="current-conditions" data-loc-id="${loc.id}">
+            <div class="cond-item">
+                <div class="cond-label">Temperature</div>
+                <div class="cond-value cc-temp"></div>
+                <div class="cond-sub">&nbsp;</div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Wind</div>
+                <div class="cond-value cc-wind"></div>
+                <div class="cond-sub cc-wind-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Direction</div>
+                <div class="cond-value cc-dir"></div>
+                <div class="cond-sub cc-dir-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Precip / Humidity</div>
+                <div class="cond-value cc-precip"></div>
+                <div class="cond-sub cc-precip-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Pressure</div>
+                <div class="cond-value cc-pressure"></div>
+                <div class="cond-sub cc-pressure-sub">mmHg</div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Cloud Base</div>
+                <div class="cond-value cc-cbase"></div>
+                <div class="cond-sub cc-cbase-sub">AGL</div>
+            </div>
+        </div>
+        <div class="forecast-peek">${peekHTML}</div>
+        <div class="chart-area">
+            <div class="chart-header">
+                <div class="chart-tabs">
+                    <button class="chart-tab ${activeChartTab === 'temp' ? 'active' : ''}" data-tab-type="temp"
+                            onclick="switchTab(${loc.id},'temp',this)">🌡 Temp &amp; Rain</button>
+                    <button class="chart-tab ${activeChartTab === 'wind' ? 'active' : ''}" data-tab-type="wind"
+                            onclick="switchTab(${loc.id},'wind',this)">💨 Wind &amp; Gusts</button>
+                </div>
+                <div class="sun-info" id="sun-info-${loc.id}">${renderSunInfo(d.sunrise, d.sunset)}</div>
+            </div>
+            <div class="chart-wrapper"><canvas id="chart-${loc.id}"></canvas></div>
+        </div>`;
+
+    drawChart(loc.id, activeChartTab, d);
+    // Seed the header with the midday-default values.
+    updateCurrentConditions(loc.id, defaultIdx);
+
+    // When the mouse leaves the chart canvas, snap every card back to its
+    // own "now" (first visible hour) so they all stay in sync.
+    const canvas = document.getElementById(`chart-${loc.id}`);
+    if (canvas) {
+        canvas.addEventListener('mouseleave', () => resetHoverAll());
+    }
+}
+
+// Given a timestamp, find the index in this location's filtered data whose
+// timestamp is closest to it. Returns -1 if the location has no data loaded.
+function closestIndexForTs(locId, ts) {
+    const d = filteredDataCache[locId];
+    if (!d || !d.timestamps || !d.timestamps.length) return -1;
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const diff = Math.abs(d.timestamps[i] - ts);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+// Sync hover state across every location card. The user hovered `sourceIndex`
+// in `sourceLocId`'s chart/peek — find the equivalent hour in each other card
+// and update it too. This is the entry point for chart/peek hover handlers.
+function syncHover(sourceLocId, sourceIndex) {
+    const src = filteredDataCache[sourceLocId];
+    if (!src || !src.timestamps || sourceIndex < 0 || sourceIndex >= src.timestamps.length) return;
+    const ts = src.timestamps[sourceIndex];
+    locations.forEach(loc => {
+        if (loc.id === sourceLocId) {
+            updateCurrentConditions(loc.id, sourceIndex);
+        } else {
+            const idx = closestIndexForTs(loc.id, ts);
+            if (idx >= 0) updateCurrentConditions(loc.id, idx);
+        }
+    });
+}
+
+// Pick a "default" step to highlight when nothing is hovered.
+//   • On today's view → the step closest to the current wall-clock time, so
+//     the card immediately shows "what's it doing right now".
+//   • On any future day → the 2 PM PT step, which is what most people care
+//     about when planning an outdoor outing.
+function defaultIndex(d) {
+    if (!d || !d.timestamps || !d.timestamps.length) return 0;
+
+    // If the day being shown is today (PT), snap to the step nearest to now.
+    const todayStr = ptDateStr(Date.now());
+    const isToday  = d.timestamps.length && ptDateStr(d.timestamps[0]) === todayStr;
+    if (isToday) {
+        const now = Date.now();
+        let best = 0, bestDiff = Infinity;
+        for (let i = 0; i < d.timestamps.length; i++) {
+            const diff = Math.abs(d.timestamps[i] - now);
+            if (diff < bestDiff) { bestDiff = diff; best = i; }
+        }
+        return best;
+    }
+
+    // Otherwise: target 2 PM PT (midday) on the chosen day.
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const hourStr = new Date(d.timestamps[i]).toLocaleString('en-US', {
+            timeZone: PT, hour: 'numeric', hour12: false
+        });
+        const ptHour = parseInt(hourStr, 10) % 24;     // "24" → 0 in some engines
+        const diff   = Math.abs(ptHour - 14);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+// Reset every card's header back to its own default ("midday") step. Used
+// when the cursor leaves a chart/peek so all cards return together.
+function resetHoverAll() {
+    locations.forEach(loc => {
+        const d = filteredDataCache[loc.id];
+        if (d) updateCurrentConditions(loc.id, defaultIndex(d));
+    });
+}
+
+// Refresh the four header cells (Temp / Wind / Direction / Precip) with the
+// values at `index` in the currently filtered data for this location. Also
+// highlights the matching peek tile and shows the hour as a small badge.
+function updateCurrentConditions(locId, index) {
+    const d = filteredDataCache[locId];
+    if (!d || !d.timestamps || index < 0 || index >= d.timestamps.length) return;
+
+    const tF   = parseFloat(kToC(d.temp[index]));
+    const wMs  = parseFloat(msToMs(d.windSpeed[index]));
+    const gMs  = parseFloat(msToMs(d.gusts[index]));
+    const dir  = d.windDir[index];
+    const cmp  = degToCompass(dir);
+    const prcp = d.precip[index].toFixed(1);
+    const rh   = d.rh[index] ? d.rh[index].toFixed(0) : '--';
+    const when = fmtHour(d.timestamps[index]);
+    // "Now" makes sense only when we're looking at today AND at the 3h step
+    // closest to the current wall-clock time (defaultIndex on today snaps to
+    // the current hour). On any other day, we always show the formatted hour.
+    const todayStr = ptDateStr(Date.now());
+    const isNow    = activePeriod === todayStr && index === defaultIndex(d);
+
+    const cc = document.querySelector(`.current-conditions[data-loc-id="${locId}"]`);
+    if (!cc) return;
+
+    // Single time badge in the card header (avoids layout shift in the metrics row).
+    const badge = document.querySelector(`.card-time[data-loc-id="${locId}"]`);
+    if (badge) badge.textContent = isNow ? 'Now' : when;
+
+    const tEl = cc.querySelector('.cc-temp');
+    if (tEl) { tEl.textContent = `${tF}°C`; tEl.style.color = tempColor(tF); }
+
+    const wEl = cc.querySelector('.cc-wind');
+    if (wEl) {
+        wEl.innerHTML = `${wMs} <span style="font-size:14px;font-weight:400">m/s</span>`;
+        wEl.style.color = windColor(wMs);
+    }
+    const wSub = cc.querySelector('.cc-wind-sub');
+    if (wSub) {
+        // Color the gust value with the same scale as wind — pops against the
+        // muted sub-label and makes it easy to scan at a glance.
+        wSub.innerHTML = `Gusts <strong style="color:${windColor(gMs)};font-weight:700">${gMs} m/s</strong>`;
+    }
+
+    const dEl = cc.querySelector('.cc-dir');
+    if (dEl) {
+        dEl.innerHTML = `<span class="wind-arrow" style="display:inline-block;transform:rotate(${(dir + 180) % 360}deg)">↑</span>`;
+    }
+    const dSub = cc.querySelector('.cc-dir-sub');
+    if (dSub) dSub.innerHTML = `${cmp} &nbsp;${Math.round(dir)}°`;
+
+    const pEl = cc.querySelector('.cc-precip');
+    if (pEl) pEl.innerHTML = `${prcp} <span style="font-size:12px;font-weight:400">mm</span>`;
+    const pSub = cc.querySelector('.cc-precip-sub');
+    if (pSub) pSub.innerHTML = `💧 ${rh}% RH`;
+
+    // Pressure
+    const pressVal = (d.pressure && d.pressure[index] != null) ? Math.round(d.pressure[index]) : null;
+    const pressEl  = cc.querySelector('.cc-pressure');
+    if (pressEl) pressEl.textContent = pressVal != null ? pressVal : '--';
+    const pressSub = cc.querySelector('.cc-pressure-sub');
+    if (pressSub) pressSub.textContent = 'mmHg';
+
+    // Cloud base
+    const cbaseVal = (d.cloud_base && d.cloud_base[index] != null) ? d.cloud_base[index] : null;
+    const cbaseEl  = cc.querySelector('.cc-cbase');
+    const cbaseFmt = fmtCloudBase(cbaseVal);
+    if (cbaseEl) cbaseEl.textContent = cbaseFmt ?? '--';
+    const cbaseSub = cc.querySelector('.cc-cbase-sub');
+    if (cbaseSub) cbaseSub.textContent = cbaseFmt != null ? 'AGL' : '—';
+
+    // Peek tile highlight — only highlight a matching tile if one exists
+    // (we only render the first 8 peek items, but the chart can have more).
+    const peek = cc.parentElement && cc.parentElement.querySelector('.forecast-peek');
+    if (peek) {
+        peek.querySelectorAll('.peek-item').forEach(el => {
+            el.classList.toggle('active', Number(el.dataset.idx) === index);
+        });
+    }
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+// Map precipitation mm → background color. Because the strip cells share a
+// fixed height, intensity is communicated purely through color saturation.
+function precipColor(mm) {
+    if (mm < 0.05) return '#0c1520';                    // effectively no rain — matches card background
+    if (mm < 0.3)  return 'rgba(56,130,248,0.18)';      // trace
+    if (mm < 1)    return 'rgba(56,130,248,0.35)';      // light
+    if (mm < 3)    return 'rgba(56,130,248,0.55)';      // moderate
+    if (mm < 6)    return 'rgba(56,130,248,0.75)';      // heavy
+    if (mm < 12)   return 'rgba(37,99,235,0.92)';       // very heavy
+    return 'rgba(29,78,216,1.0)';                        // extreme
+}
+
+// Text-color helpers for cells that carry a numeric intensity (precip / wind).
+// Anything saturated enough to read white text, otherwise a dim value color.
+function cellTextForPrecip(mm) {
+    return mm >= 1.5 ? '#ffffff' : mm > 0.05 ? '#cfe7ff' : '#3a6a8a';
+}
+function cellTextForWind(ms) {
+    if (ms == null || isNaN(ms)) return '#e0eaf4';
+    if (ms >= 14) return '#ffffff';      // purple  → white
+    if (ms >= 11) return '#ffffff';      // red     → white
+    if (ms >= 8)  return '#ffffff';      // orange  → white
+    if (ms >= 6)  return '#1f1400';      // yellow  → dark (contrast)
+    if (ms >= 3)  return '#0b2b12';      // green   → dark
+    return '#0a2230';                    // light blue / calm → dark
+}
+
+// Map relative humidity % → background color. Dry air reads warm amber,
+// comfortable mid-range is a muted teal, humid shifts toward saturated blue
+// so the strip echoes the usual "dry → humid" rainfall palette without
+// clashing with the precip row just above it.
+function humidityColor(rh) {
+    if (rh == null || isNaN(rh)) return '#0c1520';
+    if (rh < 25) return 'rgba(245, 158, 11, 0.35)';    // very dry
+    if (rh < 40) return 'rgba(234, 179,  8, 0.22)';    // dry
+    if (rh < 55) return 'rgba(100, 116, 139, 0.22)';   // comfortable
+    if (rh < 70) return 'rgba(56,  189, 248, 0.25)';   // slightly humid
+    if (rh < 85) return 'rgba(56,  189, 248, 0.45)';   // humid
+    return 'rgba(37,   99, 235, 0.65)';                // saturated
+}
+function cellTextForHumidity(rh) {
+    if (rh == null || isNaN(rh)) return '#3a6a8a';
+    if (rh >= 85) return '#ffffff';
+    if (rh >= 55) return '#cfe7ff';
+    if (rh >= 25) return '#d0d6de';
+    return '#3a2d10';                     // warm dark text on the amber dry cell
+}
+
+// Convert hPa → mmHg (millimeters of mercury).  1 hPa = 0.750062 mmHg.
+function hPaToMmHg(hpa) {
+    if (hpa == null) return null;
+    return Math.round(hpa * 0.750062);
+}
+
+// Pressure strip — three zones matching meteorological convention:
+//   Low  < 750 mmHg (< 1000 hPa): Red   — unsettled / frontal / stormy  (maps show "L" in red)
+//   Normal 750–768 mmHg (1000–1024 hPa): neutral steel
+//   High > 768 mmHg (> 1024 hPa): Blue  — settled / fair weather        (maps show "H" in blue)
+function pressureColor(mmhg) {
+    if (mmhg == null || isNaN(mmhg)) return '#0c1520';
+    if (mmhg < 750) return 'rgba(239, 68, 68, 0.50)';     // low  — red
+    if (mmhg <= 768) return 'rgba(100, 116, 139, 0.25)';  // normal — steel
+    return 'rgba(56, 130, 248, 0.45)';                     // high — blue
+}
+function cellTextForPressure(mmhg) {
+    if (mmhg == null || isNaN(mmhg)) return '#3a6a8a';
+    if (mmhg < 750)  return '#ffc8c8';   // low  — pale red text
+    if (mmhg <= 768) return '#a0b8cc';   // normal — muted
+    return '#c8dfff';                    // high — pale blue text
+}
+
+// Cloud base ft → display string in km or m
+function fmtCloudBase(ft) {
+    if (ft == null) return null;
+    const m = Math.round(ft * 0.3048);
+    return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${m}m`;
+}
+
+// UV index color scale — WHO standard categories
+function uvColor(uv) {
+    if (uv == null || isNaN(uv) || uv < 0.5) return '#0c1520';   // night / none
+    if (uv < 3)   return 'rgba( 74, 222, 128, 0.38)';   // low       0–2   green
+    if (uv < 6)   return 'rgba(234, 179,   8, 0.45)';   // moderate  3–5   yellow
+    if (uv < 8)   return 'rgba(249, 115,  22, 0.55)';   // high      6–7   orange
+    if (uv < 11)  return 'rgba(239,  68,  68, 0.60)';   // very high 8–10  red
+    return 'rgba(167,  81, 235, 0.65)';                  // extreme   11+   violet
+}
+function cellTextForUV(uv) {
+    if (uv == null || isNaN(uv) || uv < 0.5) return '#3a6a8a';
+    if (uv < 3)   return '#c8ffe0';
+    if (uv < 6)   return '#fff8c0';
+    if (uv < 8)   return '#ffe8c0';
+    if (uv < 11)  return '#ffd0d0';
+    return '#f0d0ff';
+}
+
+// Chart.js plugin: draws one or more rows of colored cells beneath the x-axis.
+// Every cell is pixel-aligned to the matching data point on the x scale, so
+// each row shares the exact same time axis as the line chart above.
+//
+// Options schema:
+//   { rows: [{
+//       data,                    // number[] same length as chart data
+//       color:   (v,i) => cssColor,
+//       label:   (v,i) => string,
+//       textColor: (v,i) => cssColor,
+//       axisLabel: string        // rendered at left of row in y-axis gutter
+//   }, …] }
+const dataStripPlugin = {
+    id: 'dataStrip',
+    afterDraw(chart, args, opts) {
+        const rows = opts && opts.rows;
+        if (!rows || !rows.length) return;
+        const xScale = chart.scales.x;
+        if (!xScale) return;
+
+        const ctx = chart.ctx;
+        const rowH   = 20;
+        const rowGap = 2;
+        let rowTop = xScale.bottom + 6;
+
+        ctx.save();
+
+        rows.forEach(row => {
+            const data = row.data;
+            if (!data || !data.length) { rowTop += rowH + rowGap; return; }
+            const n = data.length;
+
+            // Standard histogram binning: each cell spans from the midpoint
+            // with its left neighbor to the midpoint with its right neighbor.
+            // At the ends we clamp to the chart area so the first and last
+            // cells — whose data points now sit exactly on the plot edges
+            // (ticks.align: 'inner') — don't spill over and clip their text.
+            const xLeft  = xScale.left;
+            const xRight = xScale.right;
+            const gap    = 1.5;  // visual separator between cells
+            for (let i = 0; i < n; i++) {
+                const xCenter = xScale.getPixelForValue(i);
+                let binLeft, binRight;
+                if (n === 1) {
+                    binLeft  = xCenter - 12;
+                    binRight = xCenter + 12;
+                } else if (i === 0) {
+                    binLeft  = xLeft;
+                    binRight = (xCenter + xScale.getPixelForValue(i + 1)) / 2;
+                } else if (i === n - 1) {
+                    binLeft  = (xScale.getPixelForValue(i - 1) + xCenter) / 2;
+                    binRight = xRight;
+                } else {
+                    binLeft  = (xScale.getPixelForValue(i - 1) + xCenter) / 2;
+                    binRight = (xCenter + xScale.getPixelForValue(i + 1)) / 2;
+                }
+                const cellX = binLeft + gap / 2;
+                const cellW = Math.max(1, binRight - binLeft - gap);
+                // Text centered on the bin midpoint (NOT the data point), so
+                // edge cells stay inside their cell and don't get clipped.
+                const textX = cellX + cellW / 2;
+
+                const v = data[i];
+                ctx.fillStyle = row.color ? row.color(v, i) : '#1a2e42';
+                ctx.fillRect(cellX, rowTop, cellW, rowH);
+
+                // Subtle inner border for a tidy grid look.
+                ctx.strokeStyle = 'rgba(30, 48, 72, 0.9)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cellX + 0.5, rowTop + 0.5, cellW - 1, rowH - 1);
+
+                // Cell content — either a custom render (e.g. rotated arrow)
+                // or the default text label.
+                if (row.renderCell) {
+                    row.renderCell(ctx, textX, rowTop, cellW, rowH, v, i);
+                } else {
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+                    ctx.fillStyle = row.textColor ? row.textColor(v, i) : '#fff';
+                    const label = row.label ? row.label(v, i) : String(v);
+                    ctx.fillText(label, textX, rowTop + rowH / 2);
+                }
+            }
+
+            // Axis label on the left, inside the y-axis gutter.
+            if (row.axisLabel) {
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.font = '9px -apple-system, sans-serif';
+                ctx.fillStyle = '#3a6a8a';
+                ctx.fillText(row.axisLabel, xScale.left - 4, rowTop + rowH / 2);
+            }
+
+            rowTop += rowH + rowGap;
+        });
+
+        ctx.restore();
+    }
+};
+Chart.register(dataStripPlugin);
+
+// Chart.js plugin: tints the pre-sunrise and post-sunset regions with a
+// translucent indigo wash and draws vertical dashed lines at sunrise + sunset.
+// Times are labeled in the sun-info pills above the chart, so the plugin draws
+// no text — just the visual cues. The x position is linearly interpolated
+// between the two data points straddling each moment so a 6:24 AM sunrise
+// lands correctly between the 5 AM and 8 AM steps.
+//
+// Options schema:
+//   { timestamps: number[], sunrise?: number, sunset?: number }
+const sunBarsPlugin = {
+    // Run before the dataset so the night tint sits under the line + fill.
+    id: 'sunBars',
+    beforeDatasetsDraw(chart, args, opts) {
+        if (!opts) return;
+        const ts = opts.timestamps;
+        if (!ts || !ts.length) return;
+        const xScale = chart.scales.x;
+        const area   = chart.chartArea;
+        if (!xScale || !area) return;
+
+        const n = ts.length;
+        const pixelForTs = (t) => {
+            if (t == null) return null;
+            if (t < ts[0] || t > ts[n - 1]) return null;
+            for (let i = 0; i < n - 1; i++) {
+                if (ts[i] <= t && ts[i + 1] >= t) {
+                    const span = ts[i + 1] - ts[i];
+                    const frac = span > 0 ? (t - ts[i]) / span : 0;
+                    const x0 = xScale.getPixelForValue(i);
+                    const x1 = xScale.getPixelForValue(i + 1);
+                    return x0 + (x1 - x0) * frac;
+                }
+            }
+            return xScale.getPixelForValue(n - 1);
+        };
+
+        const ctx = chart.ctx;
+        const xSunrise = pixelForTs(opts.sunrise);
+        const xSunset  = pixelForTs(opts.sunset);
+        const tint = 'rgba(76, 81, 191, 0.09)';   // very subtle indigo wash
+
+        ctx.save();
+        // Clip to the plot area so the wash doesn't bleed over the axes.
+        ctx.beginPath();
+        ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        ctx.clip();
+        ctx.fillStyle = tint;
+        // Left-of-sunrise band: area.left → sunrise
+        if (xSunrise != null && xSunrise > area.left) {
+            ctx.fillRect(area.left, area.top, xSunrise - area.left, area.bottom - area.top);
+        } else if (xSunrise == null && opts.sunrise != null && ts.length && opts.sunrise > ts[n - 1]) {
+            // Sunrise is past the visible window → whole chart is pre-sunrise night.
+            ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        }
+        // Right-of-sunset band: sunset → area.right
+        if (xSunset != null && xSunset < area.right) {
+            ctx.fillRect(xSunset, area.top, area.right - xSunset, area.bottom - area.top);
+        } else if (xSunset == null && opts.sunset != null && ts.length && opts.sunset < ts[0]) {
+            // Sunset already past before the visible window → whole chart is night.
+            ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        }
+        ctx.restore();
+    },
+    afterDatasetsDraw(chart, args, opts) {
+        if (!opts) return;
+        const ts = opts.timestamps;
+        if (!ts || !ts.length) return;
+        const xScale = chart.scales.x;
+        const area   = chart.chartArea;
+        if (!xScale || !area) return;
+
+        const n = ts.length;
+        const pixelForTs = (t) => {
+            if (t == null) return null;
+            if (t < ts[0] || t > ts[n - 1]) return null;
+            for (let i = 0; i < n - 1; i++) {
+                if (ts[i] <= t && ts[i + 1] >= t) {
+                    const span = ts[i + 1] - ts[i];
+                    const frac = span > 0 ? (t - ts[i]) / span : 0;
+                    const x0 = xScale.getPixelForValue(i);
+                    const x1 = xScale.getPixelForValue(i + 1);
+                    return x0 + (x1 - x0) * frac;
+                }
+            }
+            return xScale.getPixelForValue(n - 1);
+        };
+
+        const ctx = chart.ctx;
+        ctx.save();
+        const drawBar = (x, color) => {
+            if (x == null) return;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(x, area.top);
+            ctx.lineTo(x, area.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        };
+        drawBar(pixelForTs(opts.sunrise), 'rgba(251, 191, 36, 0.85)');
+        drawBar(pixelForTs(opts.sunset),  'rgba(167, 139, 250, 0.85)');
+        ctx.restore();
+    }
+};
+Chart.register(sunBarsPlugin);
+
+// Chart.js plugin: draws a dashed horizontal reference line at a given y value.
+// Used on the wind chart to mark the 5 m/s threshold.
+//
+// Options schema:
+//   { y: number, color?: string, label?: string }
+const refLinePlugin = {
+    id: 'refLine',
+    // `afterDatasetsDraw` runs after the line/fill are drawn but BEFORE the
+    // built-in tooltip renders, so the ref line sits above the chart data
+    // yet still under the hover tooltip (which should always be on top).
+    afterDatasetsDraw(chart, args, opts) {
+        if (!opts || opts.y == null) return;
+        const yScale = chart.scales.y;
+        const area   = chart.chartArea;
+        if (!yScale || !area) return;
+        const y = yScale.getPixelForValue(opts.y);
+        // Skip if the reference value is outside the visible y range.
+        if (y < area.top - 1 || y > area.bottom + 1) return;
+
+        const ctx = chart.ctx;
+        ctx.save();
+
+        // The dashed horizontal — stroked at high opacity so it dominates the
+        // 0.09-opacity night tint and holds its own against the sun bars
+        // (which draw at 0.85). Using a slightly thicker line too.
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = opts.color || 'rgba(250, 204, 21, 0.95)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(area.left, y);
+        ctx.lineTo(area.right, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Plain label sitting just above the cut line — no backing chip.
+        if (opts.label) {
+            ctx.font = '600 10px -apple-system, sans-serif';
+            ctx.fillStyle = opts.color || 'rgba(250, 204, 21, 1)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(opts.label, area.left + 6, y - 3);
+        }
+        ctx.restore();
+    }
+};
+Chart.register(refLinePlugin);
+
+// Scan every loaded location and return the max wind or gust value within the
+// active period, so all three cards can share a single Y-axis ceiling and the
+// visual comparison across locations is meaningful.
+function computeGlobalWindMax() {
+    let mx = 0;
+    locations.forEach(loc => {
+        const raw = weatherData[loc.id];
+        if (!raw) return;
+        const d = filterByPeriod(raw, activePeriod);
+        if (!d) return;
+        for (let i = 0; i < d.windSpeed.length; i++) {
+            const w = parseFloat(msToMs(d.windSpeed[i]));
+            const g = parseFloat(msToMs(d.gusts[i]));
+            if (w > mx) mx = w;
+            if (g > mx) mx = g;
+        }
+    });
+    return mx;
+}
+
+// Same idea as computeGlobalWindMax() but for the temp chart: returns the
+// min/max °C across every loaded location for the active day so all three
+// temp charts share an identical y-range. Returns null if no data is loaded.
+function computeGlobalTempRange() {
+    let mn = Infinity, mx = -Infinity;
+    locations.forEach(loc => {
+        const raw = weatherData[loc.id];
+        if (!raw) return;
+        const d = filterByPeriod(raw, activePeriod);
+        if (!d) return;
+        for (let i = 0; i < d.temp.length; i++) {
+            const c = parseFloat(kToC(d.temp[i]));
+            if (c < mn) mn = c;
+            if (c > mx) mx = c;
+        }
+    });
+    if (!isFinite(mn) || !isFinite(mx)) return null;
+    return { min: mn, max: mx };
+}
+
+const baseOpts = (unit, gridColor = '#0e1a28', onHoverIdx = null) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    // Fires whenever the cursor moves over the chart (even between points).
+    // We forward the active point's data index so the card header updates live.
+    onHover: (evt, items, chart) => {
+        if (!onHoverIdx) return;
+        if (items && items.length) {
+            onHoverIdx(items[0].index);
+        }
+    },
+    plugins: {
+        legend: { labels: { color: '#4a7a9a', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: {
+            backgroundColor: '#0c1520',
+            borderColor: '#1e3048',
+            borderWidth: 1,
+            titleColor: '#e0eaf4',
+            bodyColor: '#7aa8c8',
+            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y} ${unit}` }
+        }
+    },
+    scales: {
+        // `offset: true` divides the plot area into N equal slots and centers
+        // each data point in its slot. That gives the strip-plugin cells below
+        // the chart uniform widths across all N steps (including the first /
+        // last) and keeps the labels "2 AM" / "11 PM" inside the plot area so
+        // no half-label reserve is needed on either side.
+        x: { ticks: { color: '#3a6a8a', font: { size: 10 }, maxRotation: 45 }, grid: { color: gridColor }, offset: true },
+        y: { ticks: { color: '#3a6a8a', font: { size: 11 }, callback: v => `${(+Number(v).toFixed(1))}${unit}` }, grid: { color: gridColor } }
+    }
+});
+
+function drawChart(locId, type, d) {
+    const key = `${locId}`;
+    if (chartInstances[key]) { chartInstances[key].destroy(); delete chartInstances[key]; }
+
+    const canvas = document.getElementById(`chart-${locId}`);
+    if (!canvas) return;
+
+    const labels = d.timestamps.map(fmtHour);
+    // Callback handed to Chart's onHover — syncs every card's header to the
+    // hour under the cursor (not just the one being hovered).
+    const hoverHandler = (idx) => syncHover(locId, idx);
+    let cfg;
+
+    if (type === 'temp') {
+        const vals = d.temp.map(k => parseFloat(kToC(k)));
+        const precipVals = d.precip.map(p => parseFloat((+p).toFixed(2)));
+        // Any hour before sunrise or after sunset for the active day is "night",
+        // so the sky row renders a moon instead of a sun when the sky is clear.
+        const isNightTs = (ts) => {
+            if (!d.sunrise || !d.sunset) return false;
+            return ts < d.sunrise || ts >= d.sunset;
+        };
+        // Combine cloud cover, WMO weather code and the day/night flag per hour
+        // so the sky row can color the cell by cloudiness and pick a glyph that
+        // matches both conditions and time of day.
+        const skyVals = d.cloud.map((c, i) => ({
+            cloud: c,
+            code:  d.wcode ? d.wcode[i] : null,
+            night: isNightTs(d.timestamps[i])
+        }));
+        const opts = baseOpts('°C', '#0e1a28', hoverHandler);
+        // 5 strip rows × 20 + 4 × 2px gaps + 6px top + 4px tail = 118 px, round up.
+        opts.layout = { padding: { bottom: 124 } };
+
+        // Share the temp y-axis across every location card (same pattern as
+        // the wind chart) so the three cards are directly comparable at a
+        // glance — one card looking "warmer" means it actually is warmer.
+        const tempRange = computeGlobalTempRange();
+        if (tempRange) {
+            const pad = Math.max(1, (tempRange.max - tempRange.min) * 0.1);
+            opts.scales.y.min = Math.floor(tempRange.min - pad);
+            opts.scales.y.max = Math.ceil(tempRange.max + pad);
+        }
+
+        opts.plugins = {
+            ...opts.plugins,
+            // Hide the legend on the temp chart — there's only one series and
+            // the gradient line already communicates the color scale visually.
+            legend: { display: false },
+            dataStrip: {
+                rows: [
+                    {
+                        // Cloudiness / sky conditions — pale warm = sunny, cool
+                        // gray = overcast. Glyph reflects the WMO code or falls
+                        // back to the cloud-cover percentage if code is missing.
+                        // Night hours swap ☀/🌤 for 🌙.
+                        data: skyVals,
+                        color: (v) => cloudBg(v.cloud),
+                        axisLabel: 'sky',
+                        renderCell: (ctx, xCenter, rowTop, cellW, rowH, v) => {
+                            const g = weatherGlyph(v.code, v.cloud, v.night);
+                            if (!g) return;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.font = '13px -apple-system, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+                            ctx.fillStyle = '#fff';
+                            ctx.fillText(g, xCenter, rowTop + rowH / 2);
+                        }
+                    },
+                    {
+                        // UV index — WHO scale: green(low) → yellow → orange → red → violet(extreme)
+                        data: d.uv_index ? d.uv_index.map(v => v != null ? Math.round(v * 10) / 10 : null) : [],
+                        color: uvColor,
+                        label: v => v == null ? '—' : (v < 0.5 ? '—' : String(Math.round(v))),
+                        textColor: cellTextForUV,
+                        axisLabel: 'UV'
+                    },
+                    {
+                        data: precipVals,
+                        color: precipColor,
+                        label: v => v < 0.05 ? '—' : v < 1 ? v.toFixed(2) : v.toFixed(1),
+                        textColor: cellTextForPrecip,
+                        axisLabel: 'mm'
+                    },
+                    {
+                        // Relative humidity — amber for dry, teal for comfort,
+                        // blue as the air gets muggy. Numbers printed with a
+                        // trailing "%" so the unit is never ambiguous.
+                        data: d.rh.map(v => v == null ? null : Math.round(v)),
+                        color: humidityColor,
+                        label: v => v == null ? '—' : `${v}%`,
+                        textColor: cellTextForHumidity,
+                        axisLabel: 'RH'
+                    },
+                    {
+                        // Pressure in mmHg — warm gold = high pressure (fair),
+                        // steel-gray = normal, orange-red = low (stormy).
+                        data: d.pressure ? d.pressure.map(v => v != null ? Math.round(v) : null) : [],
+                        color: pressureColor,
+                        label: v => v == null ? '—' : String(v),
+                        textColor: cellTextForPressure,
+                        axisLabel: 'mmHg'
+                    }
+                ]
+            },
+            // Sunrise + sunset as vertical dashed bars, interpolated between
+            // neighboring data points so they sit at the exact local time.
+            sunBars: {
+                timestamps: d.timestamps,
+                sunrise: d.sunrise,
+                sunset:  d.sunset
+            }
+        };
+        // Segment + point colors driven by tempColor() so the temperature line
+        // shifts hue smoothly along the curve — cool purples at night give way
+        // to blue in the morning, green midday, warm orange when it peaks.
+        // Mirrors the wind chart's per-segment gradient pattern.
+        const tempSegColor = (ctx) => {
+            const chart = ctx.chart;
+            const area  = chart.chartArea;
+            if (!area) return tempColor(ctx.p0.parsed.y ?? 0);
+
+            const xScale = chart.scales.x;
+            const yScale = chart.scales.y;
+            const x0 = xScale.getPixelForValue(ctx.p0DataIndex);
+            const x1 = xScale.getPixelForValue(ctx.p1DataIndex);
+            const y0 = yScale.getPixelForValue(ctx.p0.parsed.y);
+            const y1 = yScale.getPixelForValue(ctx.p1.parsed.y);
+
+            if (x0 === x1 && y0 === y1) return tempColor(ctx.p0.parsed.y ?? 0);
+
+            const grad = chart.ctx.createLinearGradient(x0, y0, x1, y1);
+            grad.addColorStop(0, tempColor(ctx.p0.parsed.y ?? 0));
+            grad.addColorStop(1, tempColor(ctx.p1.parsed.y ?? 0));
+            return grad;
+        };
+        cfg = {
+            type: 'line',
+            data: { labels, datasets: [{
+                label: 'Temperature', data: vals,
+                borderColor: '#fb923c',                              // legend fallback
+                backgroundColor: 'rgba(251, 146, 60, 0.08)',         // subtle fill under the curve
+                fill: true, tension: 0.45, pointRadius: 3,
+                pointBackgroundColor: ctx => tempColor(ctx.parsed.y ?? 0),
+                pointBorderColor:     ctx => tempColor(ctx.parsed.y ?? 0),
+                segment: { borderColor: tempSegColor }
+            }]},
+            options: opts
+        };
+    } else {
+        // type === 'wind' — line chart of wind + gusts on top, followed by
+        // three colored strips below (wind speed, gust speed, direction).
+        const wVals = d.windSpeed.map(ms => parseFloat(msToMs(ms)));
+        const gVals = d.gusts.map(ms => parseFloat(msToMs(ms)));
+        const dirVals = d.windDir.map(x => x);
+
+        const opts = baseOpts('m/s', '#0e1a28', hoverHandler);
+        // 3 strip rows × 20px + 2 × 2px gaps + 6px top + 4px tail = 74px.
+        opts.layout = { padding: { bottom: 74 } };
+
+        // Share the same y-axis ceiling across every location card for the
+        // active day so visually comparing wind strength between cards is
+        // meaningful. Floor at 5.5 m/s so the 5 m/s reference line always has
+        // a bit of headroom above it on calm days.
+        const globalWindMax = computeGlobalWindMax();
+        opts.scales.y.min = 0;
+        opts.scales.y.max = Math.max(5.5, Math.ceil(globalWindMax + 0.5));
+
+        opts.plugins = {
+            ...opts.plugins,
+            // Hide the legend — solid line is wind, dashed is gusts; the cell
+            // strips and sun pills above carry the rest of the context.
+            legend: { display: false },
+            // Dashed horizontal line at 5 m/s — a handy "starting to feel windy"
+            // threshold that sits at the top of the green band in the wind color scale.
+            refLine: { y: 5, color: 'rgba(74, 222, 128, 0.95)', label: '5 m/s' },
+            // Night tint + sunrise/sunset dashed bars, same as the temp chart.
+            sunBars: {
+                timestamps: d.timestamps,
+                sunrise: d.sunrise,
+                sunset:  d.sunset
+            },
+            dataStrip: {
+                rows: [
+                    {
+                        data: wVals,
+                        color: (v) => windColor(v),
+                        label: (v) => v.toFixed(1),
+                        textColor: cellTextForWind,
+                        axisLabel: 'wind'
+                    },
+                    {
+                        data: gVals,
+                        color: (v) => windColor(v),
+                        label: (v) => v.toFixed(1),
+                        textColor: cellTextForWind,
+                        axisLabel: 'gust'
+                    },
+                    {
+                        data: dirVals,
+                        // Neutral dark background — the arrow carries the info.
+                        color: () => '#152236',
+                        axisLabel: 'dir',
+                        // Draw a small arrow pointing in the direction the wind
+                        // is blowing toward (meteorology stores "from" direction,
+                        // so we add 180° to flip it into "toward"). An upward
+                        // glyph with zero rotation would mean "wind toward north".
+                        renderCell: (ctx, xCenter, rowTop, cellW, rowH, deg) => {
+                            const cy = rowTop + rowH / 2;
+                            ctx.save();
+                            ctx.translate(xCenter, cy);
+                            ctx.rotate((deg + 180) * Math.PI / 180);
+                            ctx.strokeStyle = '#7dd3fc';
+                            ctx.fillStyle = '#7dd3fc';
+                            ctx.lineWidth = 1.4;
+                            ctx.lineCap = 'round';
+                            ctx.lineJoin = 'round';
+                            // Vertical shaft
+                            ctx.beginPath();
+                            ctx.moveTo(0, -6);
+                            ctx.lineTo(0, 6);
+                            ctx.stroke();
+                            // Arrowhead
+                            ctx.beginPath();
+                            ctx.moveTo(0, -7);
+                            ctx.lineTo(-3.5, -2);
+                            ctx.lineTo(3.5, -2);
+                            ctx.closePath();
+                            ctx.fill();
+                            ctx.restore();
+                        }
+                    }
+                ]
+            }
+        };
+
+        // Segment + point colors driven by the same windColor() scale the
+        // strips use below, so the line and the cells communicate the exact
+        // same intensity at a glance. Each segment is a canvas linear gradient
+        // between its two endpoints so color shifts smoothly along the curve
+        // (rather than hard-stepping at every data point).
+        const segColor = (ctx) => {
+            const chart = ctx.chart;
+            const area  = chart.chartArea;
+            // chartArea is undefined on the very first paint — bail with a
+            // solid fallback; Chart.js will re-call this with valid data.
+            if (!area) return windColor(ctx.p0.parsed.y ?? 0);
+
+            const xScale = chart.scales.x;
+            const yScale = chart.scales.y;
+            const x0 = xScale.getPixelForValue(ctx.p0DataIndex);
+            const x1 = xScale.getPixelForValue(ctx.p1DataIndex);
+            const y0 = yScale.getPixelForValue(ctx.p0.parsed.y);
+            const y1 = yScale.getPixelForValue(ctx.p1.parsed.y);
+
+            // Degenerate case (same pixel) — fall back to a solid color.
+            if (x0 === x1 && y0 === y1) return windColor(ctx.p0.parsed.y ?? 0);
+
+            const grad = chart.ctx.createLinearGradient(x0, y0, x1, y1);
+            grad.addColorStop(0, windColor(ctx.p0.parsed.y ?? 0));
+            grad.addColorStop(1, windColor(ctx.p1.parsed.y ?? 0));
+            return grad;
+        };
+        cfg = {
+            type: 'line',
+            data: { labels, datasets: [
+                {
+                    label: 'Wind', data: wVals,
+                    borderColor: '#4ade80',                  // fallback for legend marker
+                    backgroundColor: 'rgba(255,255,255,0.03)',
+                    fill: true, tension: 0.45, pointRadius: 3,
+                    pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
+                    pointBorderColor:     ctx => windColor(ctx.parsed.y ?? 0),
+                    segment: { borderColor: segColor }
+                },
+                {
+                    label: 'Gusts', data: gVals,
+                    borderColor: '#f97316',                  // fallback for legend marker
+                    backgroundColor: 'transparent',
+                    fill: false, tension: 0.45, borderDash: [5,3], pointRadius: 2,
+                    pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
+                    pointBorderColor:     ctx => windColor(ctx.parsed.y ?? 0),
+                    segment: { borderColor: segColor }
+                }
+            ]},
+            options: opts
+        };
+    }
+
+    chartInstances[key] = new Chart(canvas.getContext('2d'), cfg);
+}
+
+// Switch the chart type on EVERY loaded card at once. The user clicked a tab
+// on one card; we mirror that selection across the rest so the dashboard always
+// compares the same metric across locations.
+function switchTab(locId, type, btn) {
+    activeChartTab = type;
+    localStorage.setItem('wx-chart-tab', type);
+
+    // Update every card's tab button state (the one that was clicked + siblings on other cards)
+    document.querySelectorAll('.chart-tabs').forEach(tabs => {
+        tabs.querySelectorAll('.chart-tab').forEach(t => {
+            t.classList.toggle('active', t.dataset.tabType === type);
+        });
+    });
+
+    // Redraw every card's chart with the new type, preserving their own data.
+    locations.forEach(loc => {
+        if (!weatherData[loc.id]) return;
+        const filtered = filterByPeriod(weatherData[loc.id], activePeriod);
+        if (!filtered) return;
+        filteredDataCache[loc.id] = filtered;
+        drawChart(loc.id, type, filtered);
+        // Re-attach the mouseleave reset — a new canvas replaces the old one each time.
+        const canvas = document.getElementById(`chart-${loc.id}`);
+        if (canvas) canvas.addEventListener('mouseleave', () => resetHoverAll());
+    });
+}
+
+// ── Summary ───────────────────────────────────────────────────────────────────
+function renderSummary() {
+    const loaded = locations.filter(l => weatherData[l.id]);
+    if (!loaded.length) return;
+
+    const stats = loaded.map(l => {
+        const raw = weatherData[l.id];
+        const d = filterByPeriod(raw, activePeriod) || raw; // fallback to full data if period empty
+        const maxWind = Math.max(...d.windSpeed.map(ms => parseFloat(msToMs(ms))));
+        const maxGust = Math.max(...d.gusts.map(ms => parseFloat(msToMs(ms))));
+        const totalPrecip = d.precip.reduce((a,b) => a+b, 0);
+        const avgTemp = d.temp.reduce((a,b) => a+b, 0) / d.temp.length;
+        return {
+            name: l.name,
+            currTemp:  parseFloat(kToC(d.temp[0])),
+            avgTemp:   parseFloat(kToC(avgTemp)),
+            currWind:  parseFloat(msToMs(d.windSpeed[0])),
+            maxWind, maxGust,
+            currPrecip: d.precip[0],
+            totalPrecip: parseFloat(totalPrecip.toFixed(1)),
+            rh: d.rh[0] ? d.rh[0].toFixed(0) : '--'
+        };
+    });
+
+    const warmest = stats.reduce((a,b) => a.currTemp > b.currTemp ? a : b);
+    const coolest = stats.reduce((a,b) => a.currTemp < b.currTemp ? a : b);
+    const calmest = stats.reduce((a,b) => a.currWind < b.currWind ? a : b);
+    const windiest = stats.reduce((a,b) => a.maxWind > b.maxWind ? a : b);
+    const driest  = stats.reduce((a,b) => a.totalPrecip < b.totalPrecip ? a : b);
+    const wettest = stats.reduce((a,b) => a.totalPrecip > b.totalPrecip ? a : b);
+
+    document.getElementById('summary-grid').innerHTML = `
+        <div class="summary-card">
+            <div class="s-label">🌡 Warmest Now</div>
+            <div class="s-value" style="color:${tempColor(warmest.currTemp)}">${warmest.currTemp}°C</div>
+            <div class="s-sub">${warmest.name}</div>
+        </div>
+        <div class="summary-card">
+            <div class="s-label">❄️ Coolest Now</div>
+            <div class="s-value" style="color:${tempColor(coolest.currTemp)}">${coolest.currTemp}°C</div>
+            <div class="s-sub">${coolest.name}</div>
+        </div>
+        <div class="summary-card">
+            <div class="s-label">💨 Calmest Wind</div>
+            <div class="s-value" style="color:${windColor(calmest.currWind)}">${calmest.currWind} m/s</div>
+            <div class="s-sub">${calmest.name}</div>
+        </div>
+        <div class="summary-card">
+            <div class="s-label">🌬 Peak Gusts (48h)</div>
+            <div class="s-value" style="color:${windColor(windiest.maxGust)}">${windiest.maxGust} m/s</div>
+            <div class="s-sub">${windiest.name}</div>
+        </div>
+        <div class="summary-card">
+            <div class="s-label">🌂 Total Precip (48h)</div>
+            <div class="s-value" style="color:#60a5fa">${wettest.totalPrecip} mm</div>
+            <div class="s-sub">${wettest.name}</div>
+        </div>
+        <div class="summary-card">
+            <div class="s-label">☀️ Driest (48h)</div>
+            <div class="s-value" style="color:#4ade80">${driest.totalPrecip} mm</div>
+            <div class="s-sub">${driest.name}</div>
+        </div>`;
+
+    // Recommendation score: higher = better outdoor conditions
+    const scored = stats.map(s => ({
+        ...s,
+        score: s.avgTemp * 0.5 - s.maxWind * 0.6 - s.totalPrecip * 4 - (s.maxGust > 30 ? 12 : 0)
+    }));
+    const best = scored.reduce((a,b) => a.score > b.score ? a : b);
+    const tempF = best.currTemp;
+    const noRain = best.totalPrecip < 1;
+    const calmWind = best.maxWind < 7;
+
+    let emoji = '🌤', strong = '', detail = '';
+    if (noRain && calmWind && tempF > 16) {
+        emoji = '✅';
+        strong = `Best conditions right now: ${best.name}`;
+        detail = `Warm at ${tempF}°C, wind staying under ${best.maxWind} m/s, no significant rain in the next 48h. Great for outdoor activity.`;
+    } else if (!noRain) {
+        emoji = '🌧';
+        strong = `Rain expected — ${driest.name} is driest`;
+        detail = `${driest.name} has the least precipitation (${driest.totalPrecip} mm over 48h). Pack a rain jacket regardless.`;
+    } else if (!calmWind) {
+        emoji = '💨';
+        strong = `Windy conditions across all locations`;
+        detail = `${calmest.name} offers the calmest wind at ${calmest.currWind} m/s. Gusts up to ${windiest.maxGust} m/s expected at ${windiest.name}.`;
+    } else {
+        emoji = '🧥';
+        strong = `Cool temperatures — dress in layers`;
+        detail = `${warmest.name} is the warmest option at ${warmest.currTemp}°C. Wind is manageable at ${calmest.currWind} m/s in the calmest spot.`;
+    }
+
+    document.getElementById('recommendation-box').innerHTML = `
+        <div class="recommendation-box">
+            <div class="rec-icon">${emoji}</div>
+            <div class="rec-text"><strong>${strong}</strong><span>${detail}</span></div>
+        </div>`;
+
+    // Comparison strip
+    const strip = stats.map(s =>
+        `<div class="compare-chip"><strong>${s.name}</strong> · ${s.currTemp}°C · ${s.currWind} m/s wind · ${s.totalPrecip}mm rain</div>`
+    ).join('');
+    document.getElementById('compare-strip').innerHTML = strip;
+
+    // Stability Forecast panel — compares Now / Next Weekend / Weekend After
+    // across all loaded locations and ranks them on stable-weather criteria
+    // (no heavy rain, no temp swings/heat, calm morning wind <5 m/s).
+    renderStabilityForecast();
+}
+
+// ── Stability Forecast ────────────────────────────────────────────────────────
+// Cross-location weather stability ranker. Compares every loaded location
+// across three time windows (Now / Next Weekend / Weekend After) and scores
+// each on a 0–100 stability index. The goal is to surface which reservoir
+// has the calmest, driest, most-temperate window coming up — filtering out
+// heatwaves, cold snaps, big day-to-day temp drops, heavy rain, and windy
+// mornings (anything over 5 m/s before noon loses points fast).
+//
+// All reasoning is surfaced as small color-coded chips under each row so the
+// user can see at a glance *why* a location ranked where it did — the score
+// is never a mystery number.
+
+// Hour of day in Pacific time for a UTC timestamp (0–23).
+function getPtHour(ts) {
+    const s = new Date(ts).toLocaleString('en-US', {
+        timeZone: PT, hour: '2-digit', hour12: false
+    });
+    // Some locales return "24" for midnight — normalise to 0.
+    return parseInt(s, 10) % 24;
+}
+
+// "Apr 25" style label for a YYYY-MM-DD PT date string.
+function ptShortDate(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    return dt.toLocaleDateString('en-US', {
+        timeZone: PT, month: 'short', day: 'numeric'
+    });
+}
+
+// Return the next `count` upcoming Sat/Sun pairs as { sat, sun } date strings.
+// "Upcoming" means the next Saturday on-or-after today, unless today is
+// Sunday — in which case we jump to the following Saturday so we don't try
+// to pair Sunday with a past Saturday.
+function upcomingWeekends(count) {
+    const today = Date.now();
+    const wd = ptWeekday(today);                     // 0=Sun … 6=Sat
+    const daysToSat = (6 - wd + 7) % 7;              // 0 if Sat, 6 if Sun
+    const weekends = [];
+    for (let w = 0; w < count; w++) {
+        weekends.push({
+            sat: ptDateStrOffset(daysToSat + w * 7),
+            sun: ptDateStrOffset(daysToSat + w * 7 + 1)
+        });
+    }
+    return weekends;
+}
+
+// Build the three time-window definitions used by the panel.
+function buildStabilityWindows() {
+    const today = ptDateStr(Date.now());
+    const [w1, w2] = upcomingWeekends(2);
+    return [
+        { title: 'Now',            sub: ptShortDate(today),                              dateStrs: [today] },
+        { title: 'Next Weekend',   sub: `${ptShortDate(w1.sat)} – ${ptShortDate(w1.sun)}`, dateStrs: [w1.sat, w1.sun] },
+        { title: 'Weekend After',  sub: `${ptShortDate(w2.sat)} – ${ptShortDate(w2.sun)}`, dateStrs: [w2.sat, w2.sun] }
+    ];
+}
+
+// Aggregate stability metrics for one location across a set of PT dates.
+// Returns null if we don't have any hourly samples inside the window (the
+// forecast horizon may not reach that far yet).
+function aggregateWindow(raw, dateStrs) {
+    if (!raw || !raw.timestamps || !raw.timestamps.length) return null;
+    const all = [];
+    const byDay = Object.create(null);
+    dateStrs.forEach(ds => { byDay[ds] = []; });
+    for (let i = 0; i < raw.timestamps.length; i++) {
+        const ds = ptDateStr(raw.timestamps[i]);
+        if (byDay[ds]) { all.push(i); byDay[ds].push(i); }
+    }
+    if (!all.length) return null;
+
+    const temps = all.map(i => parseFloat(kToC(raw.temp[i])));
+    const precs = all.map(i => raw.precip[i] || 0);
+
+    // Morning wind — 5 AM through noon PT (captures the 5, 8, 11 slots on
+    // the 3-hourly Open-Meteo grid, which is what the user cares about).
+    const morningIdx = all.filter(i => {
+        const h = getPtHour(raw.timestamps[i]);
+        return h >= 5 && h <= 12;
+    });
+    const morningWinds = morningIdx.map(i => parseFloat(msToMs(raw.windSpeed[i])));
+    const morningGusts = morningIdx.map(i => parseFloat(msToMs(raw.gusts[i])));
+
+    // Per-day avg temp → biggest day-to-day swing inside the window.
+    const dayAvgs = dateStrs
+        .map(ds => {
+            const idx = byDay[ds];
+            if (!idx || !idx.length) return null;
+            const ts = idx.map(i => parseFloat(kToC(raw.temp[i])));
+            return ts.reduce((a, b) => a + b, 0) / ts.length;
+        })
+        .filter(v => v != null);
+    let dayDelta = 0;
+    for (let i = 1; i < dayAvgs.length; i++) {
+        dayDelta = Math.max(dayDelta, Math.abs(dayAvgs[i] - dayAvgs[i - 1]));
+    }
+
+    return {
+        minTemp: Math.min(...temps),
+        maxTemp: Math.max(...temps),
+        diurnal: Math.max(...temps) - Math.min(...temps),
+        totalPrecip: precs.reduce((a, b) => a + b, 0),
+        avgMorningWind: morningWinds.length ? morningWinds.reduce((a, b) => a + b, 0) / morningWinds.length : null,
+        maxMorningWind: morningWinds.length ? Math.max(...morningWinds) : null,
+        maxMorningGust: morningGusts.length ? Math.max(...morningGusts) : null,
+        dayDelta
+    };
+}
+
+// Score a window on the user's stability criteria:
+//   - No heavy rain
+//   - No heatwaves, no cold snaps
+//   - No big day-to-day temp drops
+//   - Morning wind (5 AM – noon) below 5 m/s
+// Returns { score (0-100), chips: [{kind, label}] } — chips explain the score.
+function scoreStability(agg) {
+    let score = 100;
+    const chips = [];
+
+    // ── Rain (weighted heaviest — "no intense rains") ─────────────────────
+    const p = agg.totalPrecip;
+    if      (p >= 5)   { score -= 40; chips.push({ kind: 'bad',  label: `${p.toFixed(1)}mm rain` }); }
+    else if (p >= 2)   { score -= 25; chips.push({ kind: 'warn', label: `${p.toFixed(1)}mm rain` }); }
+    else if (p >= 0.5) { score -= 10; chips.push({ kind: 'warn', label: `${p.toFixed(1)}mm rain` }); }
+    else if (p > 0)    { score -= 3;  chips.push({ kind: '',     label: `${p.toFixed(1)}mm rain` }); }
+    else               {              chips.push({ kind: 'good', label: 'dry' }); }
+
+    // ── Heatwave ──────────────────────────────────────────────────────────
+    if      (agg.maxTemp >= 32) { score -= 25; chips.push({ kind: 'bad',  label: `heat ${agg.maxTemp.toFixed(0)}°C` }); }
+    else if (agg.maxTemp >= 28) { score -= 10; chips.push({ kind: 'warn', label: `warm ${agg.maxTemp.toFixed(0)}°C` }); }
+
+    // ── Cold snap ─────────────────────────────────────────────────────────
+    if      (agg.minTemp < 3)   { score -= 20; chips.push({ kind: 'bad',  label: `cold ${agg.minTemp.toFixed(0)}°C` }); }
+    else if (agg.minTemp < 7)   { score -= 5;  chips.push({ kind: 'warn', label: `chilly ${agg.minTemp.toFixed(0)}°C` }); }
+
+    // ── Day-to-day temp swing (only meaningful when window has ≥2 days) ───
+    if      (agg.dayDelta >= 8) { score -= 15; chips.push({ kind: 'bad',  label: `Δ${agg.dayDelta.toFixed(0)}°C day-to-day` }); }
+    else if (agg.dayDelta >= 5) { score -= 7;  chips.push({ kind: 'warn', label: `Δ${agg.dayDelta.toFixed(0)}°C swing` }); }
+
+    // ── Morning wind — the user's hard constraint: calm before noon ───────
+    const mw = agg.avgMorningWind;
+    if (mw == null) {
+        chips.push({ kind: '', label: 'no AM data' });
+    } else if (mw >= 8) {
+        score -= 40;
+        chips.push({ kind: 'bad', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else if (mw >= 5) {
+        score -= 25;
+        chips.push({ kind: 'bad', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else if (mw >= 3) {
+        score -= 5;
+        chips.push({ kind: 'warn', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else {
+        chips.push({ kind: 'good', label: `calm AM ${mw.toFixed(1)} m/s` });
+    }
+
+    score = Math.max(0, Math.min(100, score));
+    return { score: Math.round(score), chips: chips.slice(0, 5) };
+}
+
+// Render the full Stability Forecast panel (three columns side-by-side).
+function renderStabilityForecast() {
+    const container = document.getElementById('stability-forecast');
+    if (!container) return;
+
+    const windows = buildStabilityWindows();
+    const cols = windows.map(w => renderStabilityCol(w)).join('');
+
+    container.innerHTML = `
+        <div class="stability-forecast">
+            <div class="sf-head">
+                <div class="sf-title">🌤️ Stability Forecast</div>
+                <div class="sf-subtitle">Ranked by: low rain, stable temps, calm mornings (&lt;5 m/s before noon)</div>
+            </div>
+            <div class="sf-grid">${cols}</div>
+        </div>
+    `;
+}
+
+function renderStabilityCol(win) {
+    const rankings = locations
+        .map(loc => {
+            const raw = weatherData[loc.id];
+            if (!raw) return null;
+            const agg = aggregateWindow(raw, win.dateStrs);
+            if (!agg) return null;
+            const { score, chips } = scoreStability(agg);
+            return { loc, agg, score, chips };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+
+    const rows = rankings.length
+        ? rankings.map((r, i) => renderStabilityRow(r, i)).join('')
+        : `<div class="sf-empty">No forecast data in this window yet.</div>`;
+
+    return `
+        <div class="sf-col">
+            <div class="sf-col-head">${win.title}</div>
+            <div class="sf-col-sub">${win.sub}</div>
+            ${rows}
+        </div>
+    `;
+}
+
+function renderStabilityRow(r, i) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const rank = medals[i] || `<span style="color:#4a7a9a">${i + 1}.</span>`;
+    const cls = r.score >= 80 ? '' : r.score >= 60 ? 'med' : r.score >= 40 ? 'low' : 'bad';
+    const chips = r.chips
+        .map(c => `<span class="sf-chip ${c.kind}">${c.label}</span>`)
+        .join('');
+    return `
+        <div class="sf-row">
+            <div class="sf-rank">${rank}</div>
+            <div class="sf-body">
+                <div class="sf-row-head">
+                    <div class="sf-loc">${r.loc.name}</div>
+                    <div class="sf-score ${cls}">${r.score}</div>
+                </div>
+                <div class="sf-reason">${chips}</div>
+            </div>
+        </div>
+    `;
+}
+
+// Expose for console debugging. Initialize the nested shape up front so later
+// code paths that assume `window.wx.raw` exists don't crash when this block
+// runs at script parse time (before loadLocation's `window.wx ||= {raw:{}}`
+// guard, which otherwise no-ops because window.wx is already truthy).
+window.wx = window.wx || {};
+if (!window.wx.raw) window.wx.raw = {};
+if (!window.wx.locations) window.wx.locations = locations;
+window.wx.stability = { renderStabilityForecast, buildStabilityWindows, upcomingWeekends, aggregateWindow, scoreStability };
+
+// ── Load / refresh ────────────────────────────────────────────────────────────
+// Fetch lightweight supplementary fields (RH, cloud base, UV) from Open-Meteo
+// for a location. Used to enrich local-ECMWF data which doesn't carry these.
+// Returns a Map keyed by UTC timestamp (ms) → { rh, cloud_base, uv_index }.
+async function fetchSupplementaryData(loc) {
+    try {
+        // No model constraint — best_match is used, which reliably provides uv_index.
+        // ECMWF IFS and NAM do not expose uv_index in Open-Meteo hourly variables.
+        const params = new URLSearchParams({
+            latitude:  loc.lat,
+            longitude: loc.lon,
+            hourly:    'temperature_2m,dew_point_2m,relative_humidity_2m,uv_index',
+            wind_speed_unit: 'ms',
+            timezone:  'UTC',
+            forecast_days: FORECAST_DAYS,
+            past_days: 1,
+        });
+        const res = await fetch(`${API_URL}?${params}`);
+        if (!res.ok) return null;
+        const raw = await res.json();
+        const h = raw?.hourly;
+        if (!h?.time) return null;
+        const lookup = new Map();
+        for (let i = 0; i < h.time.length; i++) {
+            const ts  = Date.parse(h.time[i] + 'Z');
+            const t   = h.temperature_2m?.[i];
+            const td  = h.dew_point_2m?.[i];
+            const lcl = (t != null && td != null) ? Math.round((t - td) * 400) : null;
+            lookup.set(ts, {
+                rh:         h.relative_humidity_2m?.[i] ?? null,
+                cloud_base: lcl != null && lcl > 0 ? lcl : null,
+                uv_index:   h.uv_index?.[i] ?? null,
+            });
+        }
+        return lookup;
+    } catch (e) {
+        console.warn('[supp] fetch failed:', e);
+        return null;
+    }
+}
+
+// Merge supplementary lookup into an already-processed data object in-place.
+// Matches each local timestamp to the closest API entry within ±90 min.
+function _closestSuppEntry(supp, ts) {
+    if (supp.has(ts)) return supp.get(ts);
+    let best = null, bestDiff = Infinity;
+    for (const [t, v] of supp) {
+        const diff = Math.abs(t - ts);
+        if (diff < bestDiff && diff <= 5400000) { bestDiff = diff; best = v; }
+    }
+    return best;
+}
+
+// Used for local ECMWF: overwrites rh, cloud_base, and uv_index from best_match API.
+function mergeSupplementary(processed, supp) {
+    if (!supp) return;
+    processed.rh         = [];
+    processed.cloud_base = [];
+    processed.uv_index   = [];
+    for (const ts of processed.timestamps) {
+        const e = _closestSuppEntry(supp, ts);
+        processed.rh.push(e?.rh ?? null);
+        processed.cloud_base.push(e?.cloud_base ?? null);
+        processed.uv_index.push(e?.uv_index ?? null);
+    }
+}
+
+// Used for API models: fills only uv_index (rh + cloud_base already come from main fetch).
+function mergeUVOnly(processed, supp) {
+    if (!supp) return;
+    processed.uv_index = processed.timestamps.map(ts =>
+        _closestSuppEntry(supp, ts)?.uv_index ?? null
+    );
+}
+
+async function loadLocation(loc, forceRefresh = false) {
+    // ── Priority 1: local ECMWF file (forecast-data.js written by scheduled task) ──
+    // Only active when the user has selected the "ECMWF Local" model tab.
+    // All other model tabs (ECMWF API, GFS, NAM) skip this block entirely and go
+    // straight to the Open-Meteo API, even for freshwater locations.
+    const isFreshwaterLoc = LOCATION_SETS.freshwater.some(l => l.id === loc.id);
+    if (isFreshwaterLoc && activeModel === 'ecmwf-local') {
+        const fd          = window.FORECAST_DATA;
+        const generated   = fd?.generated ? new Date(fd.generated) : null;
+        const ageDays     = generated ? (Date.now() - generated.getTime()) / 86400000 : Infinity;
+        const localEntry  = fd?.locations?.find(l => l.id === loc.id);
+
+        if (!localEntry || ageDays > 4) {
+            showStaleState(loc, ageDays);
+            renderSummary();
+            return;
+        }
+
+        // File exists and is fresh — use it, then overlay RH/cloud_base/UV from API
+        const processed = processLocalData(localEntry);
+        const supp = await fetchSupplementaryData(loc);
+        mergeSupplementary(processed, supp);
+        weatherData[loc.id] = processed;
+        // Set fetchedAt so the cache-freshness check doesn't spam the API on reload
+        weatherFetchedAt[loc.id] = Date.now();
+        updateSourceBadge(loc);
+        populateCard(loc, processed);
+        locations.forEach(l => {
+            if (l.id === loc.id) return;
+            const cached = filteredDataCache[l.id];
+            if (cached) drawChart(l.id, activeChartTab, cached);
+        });
+        renderSummary();
+        return;
+    }
+
+    // ── Priority 2: localStorage cache (still fresh, not forcing refresh) ────────
+    const ageMs = weatherFetchedAt[loc.id] ? Date.now() - weatherFetchedAt[loc.id] : Infinity;
+    const isFresh = ageMs < CACHE_MINUTES * 60 * 1000;
+    if (!forceRefresh && isFresh && weatherData[loc.id]) {
+        populateCard(loc, weatherData[loc.id]);
+        renderSummary();
+        return;
+    }
+
+    // ── Priority 3: Open-Meteo API fallback ──────────────────────────────────────
+    try {
+        const [raw, supp] = await Promise.all([fetchWeather(loc), fetchSupplementaryData(loc)]);
+        const processed = processData(raw);
+        mergeUVOnly(processed, supp);   // UV via best_match — works for all models
+        weatherData[loc.id] = processed;
+        weatherFetchedAt[loc.id] = Date.now();
+        // Stash the raw API response so we can inspect it in DevTools:
+        // open console and type:  wx.raw[<id>]   or   wx.dump(<id>)
+        window.wx = window.wx || {};
+        if (!window.wx.raw) window.wx.raw = {};
+        window.wx.raw[loc.id] = raw;
+        persistCache();   // write cache to localStorage so reloads serve from it
+        // Show model elevation in subtitle (helps spot sea-vs-ridge mismatches)
+        if (loc.id === locations[0].id && raw.elevation != null) {
+            document.getElementById('model-ref').textContent =
+                `Model: ${activeModel.toUpperCase()} · grid elevation ${Math.round(raw.elevation)} m`;
+        }
+        populateCard(loc, processed);
+        // Newly-arrived data may shift the global wind max or temp range.
+        // Redraw any sibling charts that have already been painted so they
+        // pick up the new shared y-axis and the three cards stay directly
+        // comparable at a glance.
+        locations.forEach(l => {
+            if (l.id === loc.id) return;
+            const cached = filteredDataCache[l.id];
+            if (cached) drawChart(l.id, activeChartTab, cached);
+        });
+    } catch (err) {
+        const body = document.getElementById(`body-${loc.id}`);
+        if (body) body.innerHTML = `<div class="error-state">⚠️ ${err.message}</div>`;
+    }
+    renderSummary();
+}
+
+async function refreshAll(force = false) {
+    // Check if the most recently fetched location is still within the cache window
+    const fetchTimes = Object.values(weatherFetchedAt);
+    if (!force && fetchTimes.length > 0) {
+        const latestFetch = Math.max(...fetchTimes);
+        const ageMinutes = (Date.now() - latestFetch) / 60000;
+        if (ageMinutes < CACHE_MINUTES) {
+            const remaining = Math.ceil(CACHE_MINUTES - ageMinutes);
+            const btn = document.querySelector('.btn-refresh');
+            const original = btn.textContent;
+            btn.textContent = `↻ Fresh (${remaining}m left)`;
+            btn.disabled = true;
+            btn.style.opacity = '0.55';
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.disabled = false;
+                btn.style.opacity = '';
+            }, 3000);
+            // Still re-render from cache so UI is consistent
+            locations.forEach(loc => { if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]); });
+            renderSummary();
+            const fetchedAt = new Date(latestFetch).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+            document.getElementById('updated-time').textContent = `Data fetched at ${fetchedAt} PT · refreshes in ${remaining} min`;
+            return;
+        }
+    }
+
+    // Data is stale — go fetch fresh data
+    document.getElementById('updated-time').textContent = 'Refreshing…';
+    locations.forEach(loc => {
+        const body = document.getElementById(`body-${loc.id}`);
+        if (body) body.innerHTML = '<div class="loading-state"><div class="spinner"></div><span style="font-size:13px">Loading…</span></div>';
+    });
+    await Promise.all(locations.map(loc => loadLocation(loc, true)));
+    const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    document.getElementById('updated-time').textContent = `Last updated: ${now} PT`;
+}
+
+// Overflow (⋮) menu helpers for each location card. Only one dropdown is
+// allowed to be open at a time — clicking another card's ⋮, or anywhere
+// outside the currently-open menu, closes it.
+function closeCardMenus() {
+    document.querySelectorAll('.card-menu-dropdown.open').forEach(el => {
+        el.classList.remove('open');
+        const btn = el.parentElement && el.parentElement.querySelector('.card-menu-btn');
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+}
+
+function toggleCardMenu(locId, evt) {
+    if (evt) { evt.stopPropagation(); evt.preventDefault(); }
+    const dropdown = document.getElementById(`card-menu-${locId}`);
+    if (!dropdown) return;
+    const wasOpen = dropdown.classList.contains('open');
+    closeCardMenus();
+    if (!wasOpen) {
+        dropdown.classList.add('open');
+        const btn = dropdown.parentElement && dropdown.parentElement.querySelector('.card-menu-btn');
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+    }
+}
+
+// Global click listener: close any open dropdown when clicking outside of it.
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.card-menu')) closeCardMenus();
+});
+
+// Close on Escape for keyboard users.
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeCardMenus();
+});
+
+// Dump every timestamp → temp/wind value for a location, so you can compare
+// directly against windy.com (or any other forecast site) for the same coords.
+function debugDump(locId) {
+    const loc = locations.find(l => l.id === locId);
+    const d   = weatherData[locId];
+    const raw = window.wx && window.wx.raw ? window.wx.raw[locId] : null;
+    if (!loc || !d) return console.warn('No data for location', locId);
+
+    console.group(`🔍 ${loc.name} (${loc.lat}, ${loc.lon}) — model: ${activeModel} (${OPEN_METEO_MODELS[activeModel]})`);
+    console.log('Compare against:');
+    console.log('  • windy.com:', `https://www.windy.com/?${loc.lat},${loc.lon},10`);
+    console.log('  • open-meteo:', `https://open-meteo.com/en/docs?latitude=${loc.lat}&longitude=${loc.lon}&hourly=temperature_2m`);
+    if (raw && raw.elevation != null) {
+        console.log(`Grid elevation: ${raw.elevation} m · timezone: ${raw.timezone} (offset ${raw.utc_offset_seconds}s)`);
+        console.log('Units:', raw.hourly_units);
+    }
+
+    console.log('idx | PT time              |   °C  | wind m/s | gust m/s | dir');
+    console.log('----+----------------------+-------+----------+----------+----');
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const ts = d.timestamps[i];
+        const pt = new Date(ts).toLocaleString('en-US', {
+            timeZone: PT, weekday: 'short', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit', hour12: true
+        });
+        const c  = d.temp[i] - 273.15;
+        console.log(
+            `${String(i).padStart(3)} | ${pt.padEnd(20)} | ` +
+            `${c.toFixed(1).padStart(5)} | ` +
+            `${d.windSpeed[i].toFixed(1).padStart(8)} | ` +
+            `${d.gusts[i].toFixed(1).padStart(8)} | ` +
+            `${Math.round(d.windDir[i])}°`
+        );
+    }
+    console.groupEnd();
+    console.log('%cTip: compare temperatures to windy.com — they should now be smooth and match within 1–2°C.', 'color:#7aa8c8');
+}
+
+// Expose for console use
+window.wx = window.wx || { raw: {}, dump: null, locations };
+window.wx.dump      = debugDump;
+window.wx.data      = weatherData;
+window.wx.locations = locations;
+
+function removeLocation(id) {
+    const card = document.getElementById(`card-${id}`);
+    if (card) card.remove();
+    locations = locations.filter(l => l.id !== id);
+    delete weatherData[id];
+    delete weatherFetchedAt[id];
+    persistCache();
+    renderSummary();
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal() {
+    document.getElementById('modal').classList.add('open');
+    document.getElementById('m-name').value = '';
+    document.getElementById('m-lat').value = '';
+    document.getElementById('m-lon').value = '';
+    document.getElementById('modal-error').style.display = 'none';
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+document.getElementById('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+
+async function addLocation() {
+    const name = document.getElementById('m-name').value.trim();
+    const lat  = parseFloat(document.getElementById('m-lat').value);
+    const lon  = parseFloat(document.getElementById('m-lon').value);
+    const errEl = document.getElementById('modal-error');
+
+    const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+    if (!name)                            return showErr('Please enter a location name.');
+    if (isNaN(lat) || lat < -90 || lat > 90)  return showErr('Latitude must be between -90 and 90.');
+    if (isNaN(lon) || lon < -180 || lon > 180) return showErr('Longitude must be between -180 and 180.');
+
+    const loc = { id: nextId++, name, label: name, lat, lon };
+    locations.push(loc);
+    closeModal();
+    createCard(loc);
+    await loadLocation(loc);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async function init() {
+    // Restore saved model button state
+    document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+    const savedBtn = document.getElementById(`btn-${activeModel}`);
+    if (savedBtn) savedBtn.classList.add('active');
+    // If the saved model is inside the dropdown, also activate the More button
+    const dropdownModels = ['gfs', 'namConus'];
+    const moreBtn = document.getElementById('btn-more-models');
+    if (dropdownModels.includes(activeModel) && moreBtn) {
+        moreBtn.classList.add('active');
+        moreBtn.textContent = (savedBtn?.textContent || 'More') + ' ▾';
+    }
+
+    // Restore saved water-type switcher state (freshwater / saltwater)
+    document.querySelectorAll('.water-btn').forEach(b => b.classList.remove('active'));
+    const waterBtn = document.getElementById(`water-${activeLocationSet}`);
+    if (waterBtn) waterBtn.classList.add('active');
+
+    renderDayTabs();
+    locations.forEach(createCard);
+
+    // If any cached data is still fresh, render it immediately so a reload
+    // shows consistent numbers instead of firing a fresh API call (which is
+    // what was causing the "random number" jitter on rapid reloads).
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    if (Object.keys(weatherData).length) renderSummary();
+
+    // loadLocation(loc, false) respects the 30-min cache — fresh entries skip the API.
+    await Promise.all(locations.map(loc => loadLocation(loc, false)));
+
+    const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    const modelLabel = activeModel === 'ecmwf-local' ? 'ECMWF Local (Windy)' : activeModel.toUpperCase();
+    document.getElementById('updated-time').textContent = `Last updated: ${now} PT · Model: ${modelLabel} · auto-refreshes after ${CACHE_MINUTES} min`;
+
+    // Restore summary collapsed state
+    if (localStorage.getItem('wx-summary-collapsed') === 'true') {
+        document.getElementById('summary-section').classList.add('collapsed');
+    }
+})();
+
+function toggleSummary() {
+    const section = document.getElementById('summary-section');
+    const collapsed = section.classList.toggle('collapsed');
+    localStorage.setItem('wx-summary-collapsed', collapsed);
+}
+</script>
+</body>
+</html>
