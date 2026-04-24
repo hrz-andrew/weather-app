@@ -975,7 +975,7 @@
     <div class="header-actions">
         <div class="model-switcher">
             <label>Model:</label>
-            <button class="model-btn active" id="btn-ecmwf-local" onclick="setModel('ecmwf-local', this)" title="ECMWF scraped daily from Windy — local file, no API call">ECMWF Local</button>
+            <button class="model-btn active" id="btn-ecmwf-local" onclick="setModel('ecmwf-local', this)" title="ECMWF forecast via JSONBin">JSON</button>
             <button class="model-btn" id="btn-ecmwf" onclick="setModel('ecmwf', this)" title="ECMWF IFS via Open-Meteo API (~25 km)">ECMWF</button>
             <!-- GFS + NAM tucked into a dropdown -->
             <div class="model-dropdown" id="model-dropdown-wrapper">
@@ -1594,7 +1594,7 @@ function updateSourceBadge(loc) {
             hour: 'numeric', minute: '2-digit' })
         : 'local file';
     document.getElementById('model-ref').textContent =
-        `Source: ECMWF Local (Windy) · Updated ${when}`;
+        `Source: ECMWF via JSONBin · Updated ${when}`;
 }
 
 // Render the stale / missing-data empty state into a location card.
@@ -3451,7 +3451,7 @@ async function tryLoadFromJsonBin() {
     for (const loc of locations) { await loadLocation(loc, false); }
 
     const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
-    const modelLabel = activeModel === 'ecmwf-local' ? 'ECMWF Local (Windy)' : activeModel.toUpperCase();
+    const modelLabel = activeModel === 'ecmwf-local' ? 'ECMWF (JSONBin)' : activeModel.toUpperCase();
     document.getElementById('updated-time').textContent = `Last updated: ${now} PT · Model: ${modelLabel} · auto-refreshes after ${CACHE_MINUTES} min`;
 
     // Restore summary collapsed state
