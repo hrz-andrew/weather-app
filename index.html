@@ -3085,17 +3085,22 @@ if (!window.wx.locations) window.wx.locations = locations;
 window.wx.stability = { renderStabilityForecast, buildStabilityWindows, upcomingWeekends, aggregateWindow, scoreStability };
 
 // ── Load / refresh ────────────────────────────────────────────────────────────
-// Fetch lightweight supplementary fields (RH, cloud base, UV) from Open-Meteo
-// for a location. Used to enrich local-ECMWF data which doesn't carry these.
-// Returns a Map keyed by UTC timestamp (ms) → { rh, cloud_base, uv_index }.
+// Fetch lightweight supplementary fields from Open-Meteo for a location.
+// Used to enrich local-ECMWF data (Windy scrape) which only carries the core
+// fields: temp, rain, wind, gusts, wind_dir. Everything else comes from here.
+// Returns a Map keyed by UTC timestamp (ms) →
+//   { rh, cloud_base, uv_index, pressure, wcode, cloud }
 async function fetchSupplementaryData(loc) {
     try {
         // No model constraint — best_match is used, which reliably provides uv_index.
-        // ECMWF IFS and NAM do not expose uv_index in Open-Meteo hourly variables.
+        // ECMWF IFS and NAM do not expose uv_index in Open-Meteo hourly variables,
+        // so we accept that pressure/sky/cloud here may come from a slightly
+        // different model run than Windy's ECMWF temp/wind data. For local fishing
+        // forecasts the model-mixing is acceptable and keeps the scraper minimal.
         const params = new URLSearchParams({
             latitude:  loc.lat,
             longitude: loc.lon,
-            hourly:    'temperature_2m,dew_point_2m,relative_humidity_2m,uv_index',
+            hourly:    'temperature_2m,dew_point_2m,relative_humidity_2m,uv_index,pressure_msl,weather_code,cloud_cover',
             wind_speed_unit: 'ms',
             timezone:  'UTC',
             forecast_days: FORECAST_DAYS,
@@ -3112,10 +3117,14 @@ async function fetchSupplementaryData(loc) {
             const t   = h.temperature_2m?.[i];
             const td  = h.dew_point_2m?.[i];
             const lcl = (t != null && td != null) ? Math.round((t - td) * 400) : null;
+            const pHpa = h.pressure_msl?.[i];
             lookup.set(ts, {
                 rh:         h.relative_humidity_2m?.[i] ?? null,
                 cloud_base: lcl != null && lcl > 0 ? lcl : null,
                 uv_index:   h.uv_index?.[i] ?? null,
+                pressure:   pHpa != null ? Math.round(pHpa * 0.750062) : null,  // hPa → mmHg
+                wcode:      h.weather_code?.[i] ?? null,                         // WMO code
+                cloud:      h.cloud_cover?.[i] ?? null,                          // % cloud cover
             });
         }
         return lookup;
@@ -3137,17 +3146,26 @@ function _closestSuppEntry(supp, ts) {
     return best;
 }
 
-// Used for local ECMWF: overwrites rh, cloud_base, and uv_index from best_match API.
+// Used for local ECMWF: overwrites all non-core fields from best_match API.
+// The Windy scrape only provides temp / wind / gusts / wind_dir / precip — every
+// other strip-row field (RH, cloud base, UV, pressure, sky icon code, cloud %)
+// is filled here so the scraper stays fast.
 function mergeSupplementary(processed, supp) {
     if (!supp) return;
     processed.rh         = [];
     processed.cloud_base = [];
     processed.uv_index   = [];
+    processed.pressure   = [];
+    processed.wcode      = [];
+    processed.cloud      = [];
     for (const ts of processed.timestamps) {
         const e = _closestSuppEntry(supp, ts);
         processed.rh.push(e?.rh ?? null);
         processed.cloud_base.push(e?.cloud_base ?? null);
         processed.uv_index.push(e?.uv_index ?? null);
+        processed.pressure.push(e?.pressure ?? null);
+        processed.wcode.push(e?.wcode ?? null);
+        processed.cloud.push(e?.cloud ?? null);
     }
 }
 
