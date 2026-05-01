@@ -3399,16 +3399,29 @@ async function addLocation() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 // Try to load fresh ECMWF Local data from JSONBin before init.
-// Overwrites window.FORECAST_DATA if the bin has newer data.
-// On GitHub Pages the local script tag doesn't exist, so this is the only source.
+// Strategy: prefer whichever source has the newer `generated` timestamp.
+//   - On GitHub Pages: the local <script src="forecast-data.js"> 404s, so JSONBin wins by default.
+//   - Locally: if you just ran the skill, the local file is fresher than the bin → keep local.
+//   - If JSONBin is newer (e.g. someone else ran the skill), we adopt it.
 async function tryLoadFromJsonBin() {
     try {
         const res = await fetch('https://api.jsonbin.io/v3/b/69ebade636566621a8ea444d/latest');
         if (!res.ok) return;
         const json = await res.json();
-        if (json.record && json.record.locations && json.record.locations.length) {
-            window.FORECAST_DATA = json.record;
-            console.log('[wx] FORECAST_DATA loaded from JSONBin ·', json.record.generated);
+        const remote = json.record;
+        if (!remote || !remote.locations || !remote.locations.length) return;
+
+        const local = window.FORECAST_DATA;
+        const localTs  = local  && local.generated  ? Date.parse(local.generated)  : 0;
+        const remoteTs = remote && remote.generated ? Date.parse(remote.generated) : 0;
+
+        if (remoteTs > localTs) {
+            window.FORECAST_DATA = remote;
+            console.log('[wx] FORECAST_DATA loaded from JSONBin ·', remote.generated,
+                        local ? `(local was ${local.generated})` : '(no local file)');
+        } else {
+            console.log('[wx] Local forecast-data.js is fresher than JSONBin — keeping local ·',
+                        local.generated, 'vs bin', remote.generated);
         }
     } catch(e) {
         console.warn('[wx] JSONBin fetch failed — using local file or API fallback', e);
