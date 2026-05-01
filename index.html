@@ -1784,7 +1784,7 @@ function populateCard(loc, rawD) {
             <div class="cond-item">
                 <div class="cond-label">Temperature</div>
                 <div class="cond-value cc-temp"></div>
-                <div class="cond-sub">&nbsp;</div>
+                <div class="cond-sub cc-temp-sub">&nbsp;</div>
             </div>
             <div class="cond-item">
                 <div class="cond-label">Wind</div>
@@ -1941,6 +1941,13 @@ function updateCurrentConditions(locId, index) {
 
     const tEl = cc.querySelector('.cc-temp');
     if (tEl) { tEl.textContent = `${tF}°C`; tEl.style.color = tempColor(tF); }
+    const tSub = cc.querySelector('.cc-temp-sub');
+    if (tSub) {
+        // Mirror the Gusts treatment: muted line with the colored value pop.
+        // tempColor() takes °C, so feed it tF (the °C value) for a matching hue.
+        const tFahr = (tF * 9 / 5 + 32).toFixed(1);
+        tSub.innerHTML = `<strong style="color:${tempColor(tF)};font-weight:700">${tFahr}°F</strong>`;
+    }
 
     const wEl = cc.querySelector('.cc-wind');
     if (wEl) {
@@ -2404,7 +2411,18 @@ const baseOpts = (unit, gridColor = '#0e1a28', onHoverIdx = null) => ({
             borderWidth: 1,
             titleColor: '#e0eaf4',
             bodyColor: '#7aa8c8',
-            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y} ${unit}` }
+            callbacks: {
+                label: ctx => {
+                    const base = ` ${ctx.dataset.label}: ${ctx.parsed.y} ${unit}`;
+                    // Append °F only on the temperature chart — `unit` is the
+                    // baseOpts arg, so this branch never fires for wind (m/s).
+                    if (unit === '°C') {
+                        const f = (ctx.parsed.y * 9 / 5 + 32).toFixed(1);
+                        return `${base}  /  ${f} °F`;
+                    }
+                    return base;
+                }
+            }
         }
     },
     scales: {
