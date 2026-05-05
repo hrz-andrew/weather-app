@@ -946,6 +946,201 @@
             font-size: 13px;
             font-style: italic;
         }
+
+        /* ── Tablet (≤ 900px) ────────────────────────────────────────── */
+        @media (max-width: 900px) {
+            .locations-grid {
+                grid-template-columns: 1fr;
+            }
+            .main {
+                padding: 20px 20px;
+            }
+            header {
+                padding: 16px 20px;
+            }
+        }
+
+        /* ── Mobile (≤ 640px) ────────────────────────────────────────── */
+        @media (max-width: 640px) {
+
+            /* Header: collapse to 2-row grid
+               Row 1: title (left) + water switcher (right)
+               Row 2: model + refresh controls (full width) */
+            header {
+                padding: 12px 14px;
+                grid-template-columns: 1fr auto;
+                grid-template-rows: auto auto;
+                gap: 10px 8px;
+            }
+
+            .header-left {
+                grid-column: 1;
+                grid-row: 1;
+                min-width: 0;
+            }
+
+            .header-left h1 {
+                font-size: 16px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .header-left .subtitle {
+                font-size: 11px;
+            }
+
+            /* Water switcher: top-right, icon-only to save width */
+            #water-switcher {
+                grid-column: 2;
+                grid-row: 1;
+                align-self: center;
+            }
+
+            .water-btn span:not(.water-icon) {
+                display: none;
+            }
+
+            .water-btn {
+                padding: 6px 10px;
+            }
+
+            /* Actions: second row, full width */
+            .header-actions {
+                grid-column: 1 / -1;
+                grid-row: 2;
+                justify-content: flex-start;
+                flex-wrap: nowrap;
+                gap: 6px;
+            }
+
+            .model-switcher {
+                margin-left: 0;
+                gap: 4px;
+            }
+
+            /* Hide "Model:" label — implied by button row */
+            .model-switcher label {
+                display: none;
+            }
+
+            .model-btn {
+                padding: 5px 9px;
+                font-size: 11px;
+            }
+
+            /* Refresh: compact, pushed to right */
+            .btn-refresh {
+                padding: 6px 10px;
+                font-size: 12px;
+                margin-left: auto;
+            }
+
+            /* Add Location: hide on mobile (modal UX awkward on small screens) */
+            .btn-primary {
+                display: none;
+            }
+
+            /* ── Main content ── */
+            .main {
+                padding: 12px 12px;
+            }
+
+            /* Summary */
+            .summary-section {
+                padding: 16px 14px;
+                margin-bottom: 14px;
+            }
+
+            /* Day tabs bar */
+            .day-tabs-bar {
+                padding: 8px 10px;
+                margin: 12px 0 10px;
+            }
+
+            .period-btn {
+                padding: 6px 8px;
+                min-width: 48px;
+                font-size: 12px;
+            }
+
+            .period-btn .day-name { font-size: 12px; }
+            .period-btn .day-date { font-size: 10px; }
+
+            /* ── Location cards ── */
+            .locations-grid {
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+
+            .card-header {
+                padding: 14px 16px 12px;
+            }
+
+            .card-header h3 {
+                font-size: 15px;
+            }
+
+            /* Conditions: keep 3-col, reduce padding */
+            .cond-item {
+                padding: 10px 8px;
+            }
+
+            .cond-value {
+                font-size: 19px;
+            }
+
+            .cond-label {
+                font-size: 9px;
+            }
+
+            /* Forecast peek: horizontal scroll instead of squishing */
+            .forecast-peek {
+                padding: 10px 14px 0;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                scroll-snap-type: x proximity;
+                gap: 5px;
+                /* hide scrollbar visually but keep scroll */
+                scrollbar-width: none;
+            }
+
+            .forecast-peek::-webkit-scrollbar { display: none; }
+
+            .peek-item {
+                flex: 0 0 56px;
+                scroll-snap-align: start;
+                padding: 6px 3px;
+            }
+
+            /* Chart */
+            .chart-area {
+                padding: 12px 12px 14px;
+            }
+
+            .chart-wrapper {
+                height: 230px;
+            }
+
+            .chart-header {
+                margin-bottom: 10px;
+                gap: 8px;
+            }
+
+            .sun-info {
+                gap: 5px;
+            }
+
+            .sun-info .sun-item {
+                padding: 3px 6px;
+                font-size: 10px;
+            }
+
+            /* Modal: already 94vw, just tighten padding */
+            .modal {
+                padding: 20px 16px;
+            }
+        }
     </style>
 </head>
 <body>
