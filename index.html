@@ -2672,38 +2672,12 @@ const sunBarsPlugin = {
             // Sunset already past before the visible window → whole chart is night.
             ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
         }
-        ctx.restore();
-    },
-    afterDatasetsDraw(chart, args, opts) {
-        if (!opts) return;
-        const ts = opts.timestamps;
-        if (!ts || !ts.length) return;
-        const xScale = chart.scales.x;
-        const area   = chart.chartArea;
-        if (!xScale || !area) return;
-
-        const n = ts.length;
-        const pixelForTs = (t) => {
-            if (t == null) return null;
-            if (t < ts[0] || t > ts[n - 1]) return null;
-            for (let i = 0; i < n - 1; i++) {
-                if (ts[i] <= t && ts[i + 1] >= t) {
-                    const span = ts[i + 1] - ts[i];
-                    const frac = span > 0 ? (t - ts[i]) / span : 0;
-                    const x0 = xScale.getPixelForValue(i);
-                    const x1 = xScale.getPixelForValue(i + 1);
-                    return x0 + (x1 - x0) * frac;
-                }
-            }
-            return xScale.getPixelForValue(n - 1);
-        };
-
-        const ctx = chart.ctx;
-        ctx.save();
-        const drawBar = (x, color) => {
+        // Dashed vertical bars — also in beforeDatasetsDraw so they sit
+        // behind the gradient fill and the data lines.
+        const drawBar = (x) => {
             if (x == null) return;
             ctx.setLineDash([4, 4]);
-            ctx.strokeStyle = color;
+            ctx.strokeStyle = 'rgba(100, 130, 160, 0.6)';
             ctx.lineWidth = 1.2;
             ctx.beginPath();
             ctx.moveTo(x, area.top);
@@ -2711,40 +2685,32 @@ const sunBarsPlugin = {
             ctx.stroke();
             ctx.setLineDash([]);
         };
-        drawBar(pixelForTs(opts.sunrise), 'rgba(251, 191, 36, 0.85)');
-        drawBar(pixelForTs(opts.sunset),  'rgba(167, 139, 250, 0.85)');
+        drawBar(pixelForTs(opts.sunrise));
+        drawBar(pixelForTs(opts.sunset));
         ctx.restore();
     }
 };
 Chart.register(sunBarsPlugin);
 
 // Chart.js plugin: draws a dashed horizontal reference line at a given y value.
-// Used on the wind chart to mark the 5 m/s threshold.
+// Uses beforeDatasetsDraw so the line sits behind the gradient fill and data.
 //
 // Options schema:
 //   { y: number, color?: string, label?: string }
 const refLinePlugin = {
     id: 'refLine',
-    // `afterDatasetsDraw` runs after the line/fill are drawn but BEFORE the
-    // built-in tooltip renders, so the ref line sits above the chart data
-    // yet still under the hover tooltip (which should always be on top).
-    afterDatasetsDraw(chart, args, opts) {
+    beforeDatasetsDraw(chart, args, opts) {
         if (!opts || opts.y == null) return;
         const yScale = chart.scales.y;
         const area   = chart.chartArea;
         if (!yScale || !area) return;
         const y = yScale.getPixelForValue(opts.y);
-        // Skip if the reference value is outside the visible y range.
         if (y < area.top - 1 || y > area.bottom + 1) return;
 
         const ctx = chart.ctx;
         ctx.save();
-
-        // The dashed horizontal — stroked at high opacity so it dominates the
-        // 0.09-opacity night tint and holds its own against the sun bars
-        // (which draw at 0.85). Using a slightly thicker line too.
         ctx.setLineDash([5, 4]);
-        ctx.strokeStyle = opts.color || 'rgba(250, 204, 21, 0.95)';
+        ctx.strokeStyle = opts.color || 'rgba(100, 130, 160, 0.6)';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(area.left, y);
@@ -2752,10 +2718,9 @@ const refLinePlugin = {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Plain label sitting just above the cut line — no backing chip.
         if (opts.label) {
             ctx.font = '600 10px -apple-system, sans-serif';
-            ctx.fillStyle = opts.color || 'rgba(250, 204, 21, 1)';
+            ctx.fillStyle = opts.color || 'rgba(100, 130, 160, 0.8)';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'bottom';
             ctx.fillText(opts.label, area.left + 6, y - 3);
@@ -3026,7 +2991,7 @@ function drawChart(locId, type, d) {
             legend: { display: false },
             // Dashed horizontal line at 5 m/s — a handy "starting to feel windy"
             // threshold that sits at the top of the green band in the wind color scale.
-            refLine: { y: 5, color: 'rgba(74, 222, 128, 0.95)', label: '5 m/s' },
+            refLine: { y: 5, color: 'rgba(100, 130, 160, 0.6)', label: '5 m/s' },
             // Night tint + sunrise/sunset dashed bars, same as the temp chart.
             sunBars: {
                 timestamps: d.timestamps,
