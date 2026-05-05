@@ -1864,6 +1864,225 @@ function windColor(ms) {
          :            '#7dd3fc';
 }
 
+// RGB variants of the color functions — used by makeGradientFillPlugin() to
+// build canvas gradients with arbitrary alpha values.
+function tempColorRgb(c) {
+    if (c == null || isNaN(c)) return [148, 163, 184];
+    const stops = TEMP_COLOR_STOPS;
+    if (c <= stops[0].t) return stops[0].c.slice();
+    if (c >= stops[stops.length-1].t) return stops[stops.length-1].c.slice();
+    for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1];
+        if (c >= a.t && c <= b.t) {
+            const f = (c - a.t) / (b.t - a.t);
+            return [
+                Math.round(a.c[0] + (b.c[0] - a.c[0]) * f),
+                Math.round(a.c[1] + (b.c[1] - a.c[1]) * f),
+                Math.round(a.c[2] + (b.c[2] - a.c[2]) * f)
+            ];
+        }
+    }
+    return [148, 163, 184];
+}
+function windColorRgb(ms) {
+    if (ms == null || isNaN(ms)) return [148, 163, 184];
+    if (ms >= 14) return [168,  85, 247];
+    if (ms >= 11) return [239,  68,  68];
+    if (ms >= 8)  return [249, 115,  22];
+    if (ms >= 6)  return [250, 204,  21];
+    if (ms >= 3)  return [ 74, 222, 128];
+    return [125, 211, 252];
+}
+
+// Creates a Chart.js inline plugin that draws a filled area whose colour
+// follows the line's own colour scale (horizontal gradient keyed to data
+// values) AND fades to transparent at the baseline (vertical fade via an
+// offscreen canvas + destination-out pass). The plugin fires before Chart.js
+// draws the dataset, so the fill lands underneath the line.
+//
+// opts:
+//   colorFn  — function(value) → [r, g, b]
+//   dsIndex  — which dataset index to fill (default 0)
+//   topAlpha — max fill opacity at the top of the chart area (default 0.35)
+// Replicates Chart.js's cardinal spline formula (tension parameter matches
+// the dataset's `tension: 0.45`) so the fill path aligns exactly with the
+// rendered line. Returns one {cp1, cp2} object per point; cp2 is the control
+// point leaving point i toward i+1, cp1 is the one entering point i from i-1.
+function _splineCPs(pts, tension) {
+    return pts.map((curr, i) => {
+        const prev = pts[Math.max(0, i - 1)];
+        const next = pts[Math.min(pts.length - 1, i + 1)];
+        const d01  = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+        const d12  = Math.hypot(next.x - curr.x,  next.y - curr.y);
+        const sum  = d01 + d12 || 1;
+        const fa   = tension * (d01 / sum);   // weight toward prev
+        const fb   = tension * (d12 / sum);   // weight toward next
+        return {
+            cp1: { x: curr.x - fa * (next.x - prev.x),  y: curr.y - fa * (next.y - prev.y) },
+            cp2: { x: curr.x + fb * (next.x - prev.x),  y: curr.y + fb * (next.y - prev.y) }
+        };
+    });
+}
+
+function makeGradientFillPlugin({ colorFn, dsIndex = 0, topAlpha = 0.35 } = {}) {
+    return {
+        id: `gradientFill_${dsIndex}`,
+        beforeDatasetsDraw(chart) {
+            const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+            const meta = chart.getDatasetMeta(dsIndex);
+            if (!meta || !meta.data || !meta.data.length) return;
+
+            const vals     = chart.data.datasets[dsIndex].data;
+            const pts      = meta.data;
+            const baseline = Math.min(y.getPixelForValue(0), bottom);
+
+            const W = Math.round(right - left);
+            const H = Math.round(baseline - top);
+            if (W <= 0 || H <= 0) return;
+
+            // Self-computed control points — no dependency on Chart.js internals.
+            // Must use absolute canvas coords here; we subtract `left`/`top`
+            // only when writing to the offscreen canvas below.
+            const cps = _splineCPs(pts.map(p => ({ x: p.x, y: p.y })), 0.45);
+
+            // ── Offscreen canvas (isolated compositing) ───────────────────
+            // The offscreen origin is (left, top) in main-canvas space.
+            // No clamping on y — bezier control points can legitimately sit
+            // above the canvas top; the canvas clips them automatically.
+            const off    = document.createElement('canvas');
+            off.width    = W;
+            off.height   = H;
+            const offCtx = off.getContext('2d');
+
+            const ox = left, oy = top;  // offscreen origin in main-canvas coords
+
+            offCtx.beginPath();
+            offCtx.moveTo(pts[0].x - ox, H);          // baseline under first point
+            offCtx.lineTo(pts[0].x - ox, pts[0].y - oy);
+
+            for (let i = 1; i < pts.length; i++) {
+                if (pts[i].skip) {
+                    offCtx.lineTo(pts[i].x - ox, H);
+                    offCtx.lineTo(pts[i].x - ox, pts[i].y - oy);
+                    continue;
+                }
+                offCtx.bezierCurveTo(
+                    cps[i - 1].cp2.x - ox, cps[i - 1].cp2.y - oy,  // exit prev
+                    cps[i    ].cp1.x - ox, cps[i    ].cp1.y - oy,   // enter curr
+                    pts[i].x - ox,          pts[i].y - oy
+                );
+            }
+
+            offCtx.lineTo(pts[pts.length - 1].x - ox, H);
+            offCtx.closePath();
+            offCtx.clip();
+
+            // Horizontal gradient: colour stops keyed to each data value's x pos
+            const hGrad = offCtx.createLinearGradient(0, 0, W, 0);
+            pts.forEach((pt, i) => {
+                if (pt.skip || vals[i] == null) return;
+                const t = Math.max(0, Math.min(1, (pt.x - ox) / W));
+                const [r, g, b] = colorFn(vals[i]);
+                hGrad.addColorStop(t, `rgba(${r},${g},${b},${topAlpha})`);
+            });
+            offCtx.fillStyle = hGrad;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Vertical fade via destination-out (only affects offscreen pixels)
+            offCtx.globalCompositeOperation = 'destination-out';
+            const vFade = offCtx.createLinearGradient(0, 0, 0, H);
+            vFade.addColorStop(0,    'rgba(0,0,0,0)');
+            vFade.addColorStop(0.45, 'rgba(0,0,0,0.1)');
+            vFade.addColorStop(1,    'rgba(0,0,0,0.86)');
+            offCtx.fillStyle = vFade;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Stamp onto main canvas — sits under the line drawn by Chart.js
+            ctx.drawImage(off, ox, oy);
+        }
+    };
+}
+
+// Wind-specific fill plugin: fills under whichever of the two datasets
+// (wind = ds 0, gusts = ds 1) is higher at each point. The lower line
+// stays as a plain stroke — no double fill, clean separation.
+function makeWindMaxFillPlugin({ colorFn, topAlpha = 0.35 } = {}) {
+    return {
+        id: 'windMaxFill',
+        beforeDatasetsDraw(chart) {
+            const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+            const m0 = chart.getDatasetMeta(0);  // wind
+            const m1 = chart.getDatasetMeta(1);  // gusts
+            if (!m0?.data?.length || !m1?.data?.length) return;
+
+            const windVals = chart.data.datasets[0].data;
+            const gustVals = chart.data.datasets[1].data;
+            const len      = Math.min(m0.data.length, m1.data.length);
+
+            // At each index, take the point that sits higher on screen (lower y px)
+            const upperPts  = [];
+            const upperVals = [];
+            for (let i = 0; i < len; i++) {
+                const wp = m0.data[i], gp = m1.data[i];
+                const useGust = gp.y < wp.y;   // smaller y = higher on screen
+                upperPts.push(useGust ? gp : wp);
+                upperVals.push(useGust ? gustVals[i] : windVals[i]);
+            }
+
+            const baseline = Math.min(y.getPixelForValue(0), bottom);
+            const W = Math.round(right - left);
+            const H = Math.round(baseline - top);
+            if (W <= 0 || H <= 0) return;
+
+            // Smooth bezier control points for the max-envelope path
+            const cps = _splineCPs(upperPts.map(p => ({ x: p.x, y: p.y })), 0.45);
+
+            const off    = document.createElement('canvas');
+            off.width    = W;
+            off.height   = H;
+            const offCtx = off.getContext('2d');
+            const ox = left, oy = top;
+
+            offCtx.beginPath();
+            offCtx.moveTo(upperPts[0].x - ox, H);
+            offCtx.lineTo(upperPts[0].x - ox, upperPts[0].y - oy);
+            for (let i = 1; i < upperPts.length; i++) {
+                if (upperPts[i].skip) continue;
+                offCtx.bezierCurveTo(
+                    cps[i-1].cp2.x - ox, cps[i-1].cp2.y - oy,
+                    cps[i  ].cp1.x - ox, cps[i  ].cp1.y - oy,
+                    upperPts[i].x  - ox, upperPts[i].y  - oy
+                );
+            }
+            offCtx.lineTo(upperPts[upperPts.length - 1].x - ox, H);
+            offCtx.closePath();
+            offCtx.clip();
+
+            // Horizontal gradient keyed to whichever value was higher
+            const hGrad = offCtx.createLinearGradient(0, 0, W, 0);
+            upperPts.forEach((pt, i) => {
+                if (upperVals[i] == null) return;
+                const t = Math.max(0, Math.min(1, (pt.x - ox) / W));
+                const [r, g, b] = colorFn(upperVals[i]);
+                hGrad.addColorStop(t, `rgba(${r},${g},${b},${topAlpha})`);
+            });
+            offCtx.fillStyle = hGrad;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Vertical fade
+            offCtx.globalCompositeOperation = 'destination-out';
+            const vFade = offCtx.createLinearGradient(0, 0, 0, H);
+            vFade.addColorStop(0,    'rgba(0,0,0,0)');
+            vFade.addColorStop(0.45, 'rgba(0,0,0,0.1)');
+            vFade.addColorStop(1,    'rgba(0,0,0,0.86)');
+            offCtx.fillStyle = vFade;
+            offCtx.fillRect(0, 0, W, H);
+
+            ctx.drawImage(off, ox, oy);
+        }
+    };
+}
+
 // Map a WMO weather code + cloud-cover percentage to a Unicode weather glyph.
 // WMO codes come from Open-Meteo and cover clear skies through thunderstorms.
 // When the weather_code is missing we fall back to cloud-cover-only glyphs.
@@ -2771,14 +2990,15 @@ function drawChart(locId, type, d) {
             type: 'line',
             data: { labels, datasets: [{
                 label: 'Temperature', data: vals,
-                borderColor: '#fb923c',                              // legend fallback
-                backgroundColor: 'rgba(251, 146, 60, 0.08)',         // subtle fill under the curve
-                fill: true, tension: 0.45, pointRadius: 3,
+                borderColor: '#fb923c',
+                backgroundColor: 'transparent',   // fill handled by makeGradientFillPlugin
+                fill: false, tension: 0.45, pointRadius: 3,
                 pointBackgroundColor: ctx => tempColor(ctx.parsed.y ?? 0),
                 pointBorderColor:     ctx => tempColor(ctx.parsed.y ?? 0),
                 segment: { borderColor: tempSegColor }
             }]},
-            options: opts
+            options: opts,
+            plugins: [ makeGradientFillPlugin({ colorFn: tempColorRgb }) ]
         };
     } else {
         // type === 'wind' — line chart of wind + gusts on top, followed by
@@ -2899,16 +3119,16 @@ function drawChart(locId, type, d) {
             data: { labels, datasets: [
                 {
                     label: 'Wind', data: wVals,
-                    borderColor: '#4ade80',                  // fallback for legend marker
-                    backgroundColor: 'rgba(255,255,255,0.03)',
-                    fill: true, tension: 0.45, pointRadius: 3,
+                    borderColor: '#4ade80',
+                    backgroundColor: 'transparent',  // fill handled by makeGradientFillPlugin
+                    fill: false, tension: 0.45, pointRadius: 3,
                     pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
                     pointBorderColor:     ctx => windColor(ctx.parsed.y ?? 0),
                     segment: { borderColor: segColor }
                 },
                 {
                     label: 'Gusts', data: gVals,
-                    borderColor: '#f97316',                  // fallback for legend marker
+                    borderColor: '#f97316',
                     backgroundColor: 'transparent',
                     fill: false, tension: 0.45, borderDash: [5,3], pointRadius: 2,
                     pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
@@ -2916,7 +3136,8 @@ function drawChart(locId, type, d) {
                     segment: { borderColor: segColor }
                 }
             ]},
-            options: opts
+            options: opts,
+            plugins: [ makeWindMaxFillPlugin({ colorFn: windColorRgb }) ]
         };
     }
 
