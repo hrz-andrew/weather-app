@@ -338,15 +338,27 @@
             line-height: 1.4;
             color: #c5d3e2;
             display: grid;
-            grid-template-columns: 14px 1fr;
-            gap: 6px;
+            grid-template-columns: 10px 1fr;
+            gap: 8px;
+            /* Default dot — neutral; overridden by .r-good / .r-soso / .r-bad. */
+            --dot: #4a7a9a;
         }
         .insight-reason::before {
-            content: '▸';
-            color: #4a7a9a;
-            font-size: 11px;
-            line-height: 1.45;
+            content: '';
+            display: block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--dot);
+            margin-top: 5px;
+            justify-self: center;
+            /* Subtle glow keeps the dot legible on the dark card without
+               needing a thicker outline. Matches the score-pill palette. */
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot) 18%, transparent);
         }
+        .insight-reason.r-good { --dot: #4ade80; }   /* green — positive signal */
+        .insight-reason.r-soso { --dot: #fbbf24; }   /* amber — mild headwind */
+        .insight-reason.r-bad  { --dot: #f87171; }   /* red   — strong negative */
         .insight-reason .ir-why {
             display: block;
             font-size: 11px;
@@ -3389,29 +3401,33 @@ function renderInsights() {
         return;
     }
 
-    const medals = ['🥇', '🥈', '🥉'];
+    // No medal emojis — rank-1 already gets a green-tinted border + background,
+    // and the list is sorted top→bottom, so ordering is unambiguous without
+    // decoration. Per Andrew's feedback, fewer emojis = less clutter.
     grid.innerHTML = verdicts.map((v, i) => {
-        const rank   = medals[i] || `${i + 1}.`;
         const scoreCls = insightScoreClass(v.score);
         const modeCls  = v.mode === 'active' ? '' : 'ambush';
-        const modeIcon = v.mode === 'active' ? '⚡' : '🪨';
         const modeLabel = v.mode === 'active' ? 'Active mode' : 'Ambush mode';
-        const reasons = (v.reasons || []).map(r => `
-            <li class="insight-reason">
+        const reasons = (v.reasons || []).map(r => {
+            // polarity is set by insights.js — fall back to neutral if a future
+            // reason type forgets it, rather than silently dropping the dot.
+            const polCls = r.polarity ? `r-${r.polarity}` : '';
+            return `
+            <li class="insight-reason ${polCls}">
                 <div>
                     ${r.signal}
                     ${r.why ? `<span class="ir-why">${r.why}</span>` : ''}
                 </div>
-            </li>`).join('');
+            </li>`;
+        }).join('');
         return `
             <div class="insight-card rank-${i + 1}">
                 <div class="insight-head">
-                    <span class="insight-rank">${rank}</span>
                     <span class="insight-name">${v.loc.name}</span>
                     <span class="insight-score ${scoreCls}">${v.score.toFixed(0)}</span>
                 </div>
-                <div class="insight-window">📍 ${fmtInsightsWindow(v.window)}</div>
-                <span class="insight-mode ${modeCls}">${modeIcon} Bass: ${modeLabel}</span>
+                <div class="insight-window">${fmtInsightsWindow(v.window)}</div>
+                <span class="insight-mode ${modeCls}">Bass: ${modeLabel}</span>
                 <ul class="insight-reasons">${reasons}</ul>
             </div>`;
     }).join('');

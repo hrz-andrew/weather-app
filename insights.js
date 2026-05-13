@@ -120,6 +120,40 @@
         }
     };
 
+    // Polarity map: every (rule, direction) → 'good' | 'soso' | 'bad'.
+    // This lets the renderer paint a color-coded dot per reason without
+    // re-deriving the scoring logic. Keep this aligned with how the rule
+    // affects the composite score (positive multiplier / bonus → good,
+    // neutral or mild penalty → soso, strong penalty → bad).
+    function polarityFor(rule, direction) {
+        if (rule === 'fishability')  return 'bad';
+        if (rule === 'lake_note')    return 'bad';
+        if (rule === 'pressure') {
+            if (direction === 'pre_front')                                return 'good';
+            if (direction === 'slow_rise')                                return 'soso';
+            if (direction === 'post_front' || direction === 'fresh_front') return 'bad';
+            return 'soso';
+        }
+        if (rule === 'temp_trend') {
+            if (direction === 'up_strong' || direction === 'up')   return 'good';
+            if (direction === 'down')                              return 'soso';
+            if (direction === 'down_strong')                       return 'bad';
+            return 'soso';
+        }
+        if (rule === 'wind') {
+            if (direction === 'ideal' || direction === 'light')    return 'good';
+            if (direction === 'heavy' || direction === 'calm')     return 'bad';
+            return 'soso';
+        }
+        if (rule === 'rain') {
+            if (direction === 'heavy_winter')                      return 'bad';
+            if (direction === 'light' || direction === 'heavy')    return 'good';
+            return 'soso';
+        }
+        // Season chips and anything else: neutral context.
+        return 'soso';
+    }
+
     // Season buckets and their per-hour-of-day window quality curves.
     // Each curve is a 24-element array (hour 0-23). Numbers represent the base
     // score (0-100) a 3-hour window centered on that hour starts with.
@@ -522,77 +556,47 @@
         // fishing, that's the headline regardless of how good the bite is.
         // Without this on top, a "great bite, unfishable" window reads as
         // misleading optimism in the UI.
+        // Small helper so every push carries a polarity without repetition.
+        const pushReason = (rule, direction, signal, why) => {
+            reasons.push({ rule, direction, signal, why, polarity: polarityFor(rule, direction) });
+        };
+
         if (fish.level !== 'ok') {
             const peak = fish.peak.toFixed(0);
             const label =
                 fish.level === 'unfishable' ? `Gusts ${peak} m/s — shore fishing unsafe` :
                 fish.level === 'very_rough' ? `Gusts ${peak} m/s — shore casting very rough` :
                                               `Gusts ${peak} m/s — shore casting rough`;
-            reasons.push({
-                rule: 'fishability',
-                direction: fish.level,
-                signal: label,
-                why: RULE_WHYS.fishability[fish.level] || ''
-            });
+            pushReason('fishability', fish.level, label, RULE_WHYS.fishability[fish.level] || '');
         }
 
         // Pressure — highest-leverage bass signal.
         if (press.direction !== 'stable') {
-            reasons.push({
-                rule: 'pressure',
-                direction: press.direction,
-                signal: pressureSignalText(press),
-                why: RULE_WHYS.pressure[press.direction] || ''
-            });
+            pushReason('pressure', press.direction, pressureSignalText(press), RULE_WHYS.pressure[press.direction] || '');
         }
         // Temp trend.
         if (trend.direction !== 'flat') {
-            reasons.push({
-                rule: 'temp_trend',
-                direction: trend.direction,
-                signal: tempSignalText(trend),
-                why: RULE_WHYS.temp_trend[trend.direction] || ''
-            });
+            pushReason('temp_trend', trend.direction, tempSignalText(trend), RULE_WHYS.temp_trend[trend.direction] || '');
         }
         // Wind — include compass action.
         if (wind.direction !== 'light' || Math.abs(wind.score) >= 5) {
             const action = wind.compass && wind.score > 0 ? ` — fish the ${wind.compass} bank` : '';
-            reasons.push({
-                rule: 'wind',
-                direction: wind.direction,
-                signal: `${windDescriptor(wind)} (${wind.wind_ms.toFixed(0)} m/s)${action}`,
-                why: RULE_WHYS.wind[wind.direction] || ''
-            });
+            pushReason('wind', wind.direction, `${windDescriptor(wind)} (${wind.wind_ms.toFixed(0)} m/s)${action}`, RULE_WHYS.wind[wind.direction] || '');
         }
         // Rain — only if it moved the needle.
         if (rain.direction !== 'none' && Math.abs(rain.score) >= 3) {
-            reasons.push({
-                rule: 'rain',
-                direction: rain.direction,
-                signal: `${rain.mm.toFixed(1)}mm rain in last 48h`,
-                why: RULE_WHYS.rain[rain.direction] || ''
-            });
+            pushReason('rain', rain.direction, `${rain.mm.toFixed(1)}mm rain in last 48h`, RULE_WHYS.rain[rain.direction] || '');
         }
         // Season context — added if no other strong signal carries the day.
         if (reasons.length < 2) {
             const seasonKey = inferSeasonKey(season.name, hourCenter);
             if (seasonKey) {
-                reasons.push({
-                    rule: 'season',
-                    direction: seasonKey,
-                    signal: humanSeasonName(season.name),
-                    why: RULE_WHYS.season[seasonKey] || ''
-                });
+                pushReason('season', seasonKey, humanSeasonName(season.name), RULE_WHYS.season[seasonKey] || '');
             }
         }
         // Anoxic note (mainly Almaden in late June).
         if (isAnoxic && m.notes) {
-            reasons.push({
-                rule: 'lake_note',
-                direction: 'anoxic',
-                signal: m.notes,
-                why: 'lake is past summer stratification — oxygen low near surface'
-            });
+            pushReason('lake_note', 'anoxic', m.notes, 'lake is past summer stratification — oxygen low near surface');
         }
 
         return {
