@@ -109,6 +109,14 @@
             spawn:              'spawn period — sight-fishing window',
             pre_spawn:          'pre-spawn — bass staging shallow',
             wintering:          'wintering — narrow midday-only window'
+        },
+        // Fishability — separate from bite quality. Bass may bite well in a
+        // gusty pre-front window, but a shore angler can't physically fish it:
+        // casts get blown back, line bows, footing on the bank gets dangerous.
+        fishability: {
+            rough:       'sustained wind + gusts make shore casting tough',
+            very_rough:  'gusts strong enough to blow casts back at you',
+            unfishable:  'gusts too strong to stand on the bank safely'
         }
     };
 
@@ -347,7 +355,11 @@
     // - Rising sharply  → post-front (worst, often "bluebird sky" next day)
     function pressureMultiplier(internalData, windowTsIdx) {
         const ts = internalData.timestamps;
-        const p  = internalData.pressure;
+        // Prefer the frozen Windy snapshot (set by processLocalData on the
+        // local-ECMWF view) so the engine scores a single, consistent forecast.
+        // For API-model views (GFS / NAM / ECMWF-API) pressure_windy is
+        // undefined — fall through to the API's pressure for those.
+        const p  = internalData.pressure_windy || internalData.pressure;
         const targetTs = ts[windowTsIdx];
         const twelveHrMs = 12 * 3600 * 1000;
         // Find the index closest to (targetTs - 12h).
@@ -373,18 +385,43 @@
 
     // ── Step 4: wind score (additive bonus) ─────────────────────────────────
 
-    // Returns { score: -10..+15, direction: 'ideal'|'light'|'heavy'|'calm', wind_ms, compass }
+    // Returns { score: -20..+15, direction: 'ideal'|'light'|'heavy'|'calm', wind_ms, compass }
+    //
+    // Note on tuning: penalties here are calibrated for SHORE fishing.
+    // From-a-boat the curve would shift right (5–8 m/s still excellent), but
+    // Andrew fishes from the bank, so 7+ m/s is where casting/standing starts
+    // to fall apart — hence the steeper negative slope after that. Gusts are
+    // handled separately by fishabilityMultiplier (multiplicative veto), not
+    // here, because a gust-only spike shouldn't double-penalize sustained wind.
     function windScore(windMs, gusts, windDir, hourCenter) {
         const dir = compassFromBearing(windDir);
         const isLowLight = (hourCenter <= 7 || hourCenter >= 18);
         if (windMs == null) return { score: 0, direction: 'light', wind_ms: 0, compass: null };
 
         if (windMs >= 2 && windMs <= 5) return { score: 15, direction: 'ideal', wind_ms: windMs, compass: dir };
-        if (windMs > 5  && windMs <= 7) return { score: 8,  direction: 'light', wind_ms: windMs, compass: dir };
-        if (windMs > 7  && windMs <= 10) return { score: 0,  direction: 'heavy', wind_ms: windMs, compass: dir };
-        if (windMs > 10) return { score: -10, direction: 'heavy', wind_ms: windMs, compass: dir };
+        if (windMs > 5  && windMs <= 7) return { score: 5,  direction: 'light', wind_ms: windMs, compass: dir };
+        if (windMs > 7  && windMs <= 10) return { score: -8, direction: 'heavy', wind_ms: windMs, compass: dir };
+        if (windMs > 10) return { score: -20, direction: 'heavy', wind_ms: windMs, compass: dir };
         if (windMs < 1)  return { score: isLowLight ? 0 : -8, direction: 'calm', wind_ms: windMs, compass: dir };
         return { score: 5, direction: 'light', wind_ms: windMs, compass: dir }; // 1–2 m/s
+    }
+
+    // Fishability multiplier — separate from bite quality.
+    //
+    // A pre-front pressure drop ramps up the bite (pressure ×1.20), but if it
+    // comes with 12+ m/s gusts a shore angler simply can't fish it. Without
+    // this veto the model picks "great bite + impossible to fish" windows over
+    // "good bite + actually fishable" ones — exactly the failure mode that hit
+    // the 5/12 dashboard run where every lake chose Fri 7-9pm.
+    //
+    // Multiplicative on the whole composite so it overrides additive bonuses,
+    // and reads the WORSE of sustained wind / peak gust within the window.
+    function fishabilityMultiplier(windMs, gustMs) {
+        const peak = Math.max(windMs || 0, gustMs || 0);
+        if (peak >= 13) return { mul: 0.25, level: 'unfishable', peak };
+        if (peak >= 11) return { mul: 0.45, level: 'very_rough', peak };
+        if (peak >= 9)  return { mul: 0.70, level: 'rough',      peak };
+        return { mul: 1.0, level: 'ok', peak };
     }
 
     // ── Step 5: rain score (additive bonus) ─────────────────────────────────
@@ -455,6 +492,7 @@
         const press = pressureMultiplier(internalData, idx);
         const wind  = windScore(internalData.windSpeed[idx], internalData.gusts[idx], internalData.windDir[idx], hourCenter);
         const rain  = rainScore(internalData, idx, season.name);
+        const fish  = fishabilityMultiplier(internalData.windSpeed[idx], internalData.gusts[idx]);
 
         // Anoxic check: is target date past this lake's stratification start?
         const m = meta || {};
@@ -464,7 +502,11 @@
         const mode = classifyMode({ season, tempCAvg: tempCDaily, pressureDir: press.direction, hourCenter, isAnoxic });
 
         // Step A: pure bass-rules score (no user-preference adjustment).
-        const modelScore = Math.max(0, base * trend.mul * press.mul + wind.score + rain.score);
+        // fish.mul vetos windows that are biologically prime but physically
+        // unfishable from shore (high gusts). Multiplicative so it can
+        // override an additive +15 wind bonus + ×1.2 pressure boost.
+        const bassScore  = Math.max(0, base * trend.mul * press.mul + wind.score + rain.score);
+        const modelScore = bassScore * fish.mul;
 
         // Step B: apply user availability bias. Soft multiplier, not a hard filter,
         // so a truly exceptional out-of-slot window can still shine through.
@@ -476,7 +518,25 @@
         // Assemble reasons in priority order. We'll trim to top 3 in the verdict.
         const reasons = [];
 
-        // Pressure first — it's the highest-leverage signal.
+        // Fishability FIRST — if the window is physically rough for shore
+        // fishing, that's the headline regardless of how good the bite is.
+        // Without this on top, a "great bite, unfishable" window reads as
+        // misleading optimism in the UI.
+        if (fish.level !== 'ok') {
+            const peak = fish.peak.toFixed(0);
+            const label =
+                fish.level === 'unfishable' ? `Gusts ${peak} m/s — shore fishing unsafe` :
+                fish.level === 'very_rough' ? `Gusts ${peak} m/s — shore casting very rough` :
+                                              `Gusts ${peak} m/s — shore casting rough`;
+            reasons.push({
+                rule: 'fishability',
+                direction: fish.level,
+                signal: label,
+                why: RULE_WHYS.fishability[fish.level] || ''
+            });
+        }
+
+        // Pressure — highest-leverage bass signal.
         if (press.direction !== 'stable') {
             reasons.push({
                 rule: 'pressure',
@@ -542,7 +602,7 @@
             window: { ts, isoDate, hourCenter },
             reasons,
             // Debug data — useful for tuning, hidden in the verdict UI.
-            _debug: { base, trend, press, wind, rain, tempCAvg, tempCDaily, modelScore, availMul, rawScore }
+            _debug: { base, trend, press, wind, rain, fish, tempCAvg, tempCDaily, bassScore, modelScore, availMul, rawScore }
         };
     }
 

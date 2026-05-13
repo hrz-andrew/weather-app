@@ -1914,6 +1914,13 @@ function processLocalData(entry) {
         cloud,
         wcode,
         pressure,
+        // Frozen snapshot of Windy pressure — preserved past mergeSupplementary()
+        // so the insights engine can score against pure-Windy data while the UI
+        // cards keep displaying fresher Open-Meteo values. Why two copies: the
+        // insights model wants a single, consistent forecast source (matches
+        // the harness output), while the live UI benefits from the fresher
+        // Open-Meteo updates between weekly Windy scrapes.
+        pressure_windy: pressure.slice(),
         cloud_base: new Array(n).fill(null),
         uv_index:   new Array(n).fill(null),
         sunByDate,
