@@ -8,6 +8,11 @@
     <!-- Local ECMWF forecast data — written daily by the scheduled Windy scraper task.
          If the file is absent the dashboard falls back to the Open-Meteo API. -->
     <script src="forecast-data.js" onerror="console.warn('[wx] forecast-data.js not found — API fallback active')"></script>
+    <!-- Per-lake static knowledge (anoxic dates, lake type, notes) consumed by insights.js. -->
+    <script src="lake-metadata.js"></script>
+    <!-- Bass-fishing scoring engine. Reads the internal weather shape + LAKE_META,
+         returns ranked verdicts for the Insights section. Pure logic — no DOM. -->
+    <script src="insights.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -217,6 +222,144 @@
         .summary-card .s-sub {
             font-size: 12px;
             color: #3a6a8a;
+        }
+
+        /* ── Bass Fishing Insights ──────────────────────────────────────────
+           Cards are ranked top-down. Top card gets a soft accent border to
+           pull the eye; everything else matches the rest of the dashboard's
+           card visual language (dark fill, blue-grey border, blue accents).
+           ────────────────────────────────────────────────────────────────── */
+        .insights-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 8px 16px;
+            margin-bottom: 14px;
+            font-size: 12px;
+            color: #7aa8c8;
+        }
+        .insights-head .ih-window {
+            color: #4a7a9a;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .insights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+        .insight-card {
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 12px;
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: border-color 0.2s, transform 0.15s ease;
+        }
+        .insight-card:hover { border-color: #2a4a6a; }
+        .insight-card.rank-1 {
+            border-color: #2a5a3a;
+            background: linear-gradient(135deg, #0d2218, #0c1520 60%);
+        }
+        .insight-card.rank-1:hover { border-color: #3a7a4a; }
+
+        .insight-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .insight-rank {
+            font-size: 16px;
+            flex: 0 0 auto;
+        }
+        .insight-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+            flex: 1 1 auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .insight-score {
+            font-size: 12px;
+            font-weight: 700;
+            color: #4ade80;
+            flex: 0 0 auto;
+            letter-spacing: 0.04em;
+        }
+        .insight-score.med { color: #fbbf24; }
+        .insight-score.low { color: #f97316; }
+        .insight-score.bad { color: #f87171; }
+
+        .insight-window {
+            font-size: 13px;
+            font-weight: 600;
+            color: #7aa8c8;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .insight-mode {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid #1a4a2a;
+            background: #0d2a1a;
+            color: #4ade80;
+            align-self: flex-start;
+        }
+        .insight-mode.ambush {
+            background: #2a1d08;
+            color: #fbbf24;
+            border-color: #4a3410;
+        }
+
+        .insight-reasons {
+            list-style: none;
+            padding: 0;
+            margin: 2px 0 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .insight-reason {
+            font-size: 12px;
+            line-height: 1.4;
+            color: #c5d3e2;
+            display: grid;
+            grid-template-columns: 14px 1fr;
+            gap: 6px;
+        }
+        .insight-reason::before {
+            content: '▸';
+            color: #4a7a9a;
+            font-size: 11px;
+            line-height: 1.45;
+        }
+        .insight-reason .ir-why {
+            display: block;
+            font-size: 11px;
+            color: #6a8aaa;
+            margin-top: 2px;
+        }
+        .insight-empty {
+            grid-column: 1/-1;
+            padding: 16px;
+            text-align: center;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-style: italic;
         }
 
         /* ── Stability Forecast panel ── */
@@ -1188,23 +1331,23 @@
 
 <div class="main">
 
-    <!-- Summary -->
+    <!-- Bass-fishing insights (freshwater only).
+         Outer wrapper preserved so toggleSummary() / collapsed CSS still works.
+         renderInsights() fills #insights-grid with one card per location, ranked
+         by INSIGHTS.scoreAllLocations() into the upcoming Fri–Sun window. -->
     <div class="summary-section" id="summary-section">
         <div class="section-title" onclick="toggleSummary()">
-            📊 Summary &amp; Analytics
+            🎣 Bass Fishing Insights
             <span class="section-chevron">▼</span>
         </div>
         <div class="summary-body" id="summary-body">
-            <div class="summary-grid" id="summary-grid">
+            <div class="insights-head" id="insights-head"></div>
+            <div class="insights-grid" id="insights-grid">
                 <div class="loading-state" style="grid-column:1/-1; padding:16px">
                     <div class="spinner"></div>
-                    <span style="font-size:13px">Loading summary…</span>
+                    <span style="font-size:13px">Scoring weekend windows…</span>
                 </div>
             </div>
-            <!-- Stability Forecast — injected by renderStabilityForecast() -->
-            <div id="stability-forecast"></div>
-            <div id="recommendation-box"></div>
-            <div id="compare-strip" class="compare-strip"></div>
         </div>
     </div>
 
@@ -3136,114 +3279,135 @@ function switchTab(locId, type, btn) {
     });
 }
 
-// ── Summary ───────────────────────────────────────────────────────────────────
+// ── Insights (bass fishing) ──────────────────────────────────────────────────
+// renderSummary() is the public entry point — keeps the historical name so all
+// the existing call sites (refresh, water-switch, period-switch, model-switch)
+// don't need to be edited. For freshwater it delegates to renderInsights();
+// for saltwater it hides the section entirely (bass model doesn't apply).
 function renderSummary() {
+    const section = document.getElementById('summary-section');
+    if (!section) return;
+
+    if (activeLocationSet !== 'freshwater') {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    renderInsights();
+}
+
+// Format an insights window object → "Sat 7am–9am" (PT).
+// Mirrors the formatter in test-insights.js so dashboard + harness agree.
+function fmtInsightsWindow(w) {
+    if (!w || w.ts == null) return '';
+    // The harness uses (w.ts - 7h) then reads UTC parts to get PDT. That works
+    // year-round here because the dashboard is PDT-locked (see CLAUDE.md / the
+    // scraper's PDT-only schema). If we ever support PST winters we'll swap to
+    // Intl.DateTimeFormat with timeZone:'America/Los_Angeles'.
+    const ptMs   = w.ts - 7 * 3600 * 1000;
+    const ptDate = new Date(ptMs);
+    const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][ptDate.getUTCDay()];
+    const hCenter = w.hourCenter;
+    const start   = (hCenter + 23) % 24;
+    const end     = (hCenter + 1) % 24;
+    const fmt = h => {
+        const ampm = h < 12 ? 'am' : 'pm';
+        const h12  = h % 12 === 0 ? 12 : h % 12;
+        return `${h12}${ampm}`;
+    };
+    return `${dayName} ${fmt(start)}–${fmt(end)}`;
+}
+
+// Map composite score (0–100) → tier class for the score pill.
+function insightScoreClass(score) {
+    if (score >= 70) return '';      // green
+    if (score >= 50) return 'med';   // yellow
+    if (score >= 30) return 'low';   // orange
+    return 'bad';                    // red
+}
+
+function renderInsights() {
+    const head = document.getElementById('insights-head');
+    const grid = document.getElementById('insights-grid');
+    if (!grid) return;
+
+    // Guard: scripts loaded? Data ready?
+    if (typeof INSIGHTS === 'undefined' || typeof LAKE_META === 'undefined') {
+        grid.innerHTML = `<div class="insight-empty">Insights engine not loaded.</div>`;
+        if (head) head.innerHTML = '';
+        return;
+    }
     const loaded = locations.filter(l => weatherData[l.id]);
-    if (!loaded.length) return;
-
-    const stats = loaded.map(l => {
-        const raw = weatherData[l.id];
-        const d = filterByPeriod(raw, activePeriod) || raw; // fallback to full data if period empty
-        const maxWind = Math.max(...d.windSpeed.map(ms => parseFloat(msToMs(ms))));
-        const maxGust = Math.max(...d.gusts.map(ms => parseFloat(msToMs(ms))));
-        const totalPrecip = d.precip.reduce((a,b) => a+b, 0);
-        const avgTemp = d.temp.reduce((a,b) => a+b, 0) / d.temp.length;
-        return {
-            name: l.name,
-            currTemp:  parseFloat(kToC(d.temp[0])),
-            avgTemp:   parseFloat(kToC(avgTemp)),
-            currWind:  parseFloat(msToMs(d.windSpeed[0])),
-            maxWind, maxGust,
-            currPrecip: d.precip[0],
-            totalPrecip: parseFloat(totalPrecip.toFixed(1)),
-            rh: d.rh[0] ? d.rh[0].toFixed(0) : '--'
-        };
-    });
-
-    const warmest = stats.reduce((a,b) => a.currTemp > b.currTemp ? a : b);
-    const coolest = stats.reduce((a,b) => a.currTemp < b.currTemp ? a : b);
-    const calmest = stats.reduce((a,b) => a.currWind < b.currWind ? a : b);
-    const windiest = stats.reduce((a,b) => a.maxWind > b.maxWind ? a : b);
-    const driest  = stats.reduce((a,b) => a.totalPrecip < b.totalPrecip ? a : b);
-    const wettest = stats.reduce((a,b) => a.totalPrecip > b.totalPrecip ? a : b);
-
-    document.getElementById('summary-grid').innerHTML = `
-        <div class="summary-card">
-            <div class="s-label">🌡 Warmest Now</div>
-            <div class="s-value" style="color:${tempColor(warmest.currTemp)}">${warmest.currTemp}°C</div>
-            <div class="s-sub">${warmest.name}</div>
-        </div>
-        <div class="summary-card">
-            <div class="s-label">❄️ Coolest Now</div>
-            <div class="s-value" style="color:${tempColor(coolest.currTemp)}">${coolest.currTemp}°C</div>
-            <div class="s-sub">${coolest.name}</div>
-        </div>
-        <div class="summary-card">
-            <div class="s-label">💨 Calmest Wind</div>
-            <div class="s-value" style="color:${windColor(calmest.currWind)}">${calmest.currWind} m/s</div>
-            <div class="s-sub">${calmest.name}</div>
-        </div>
-        <div class="summary-card">
-            <div class="s-label">🌬 Peak Gusts (48h)</div>
-            <div class="s-value" style="color:${windColor(windiest.maxGust)}">${windiest.maxGust} m/s</div>
-            <div class="s-sub">${windiest.name}</div>
-        </div>
-        <div class="summary-card">
-            <div class="s-label">🌂 Total Precip (48h)</div>
-            <div class="s-value" style="color:#60a5fa">${wettest.totalPrecip} mm</div>
-            <div class="s-sub">${wettest.name}</div>
-        </div>
-        <div class="summary-card">
-            <div class="s-label">☀️ Driest (48h)</div>
-            <div class="s-value" style="color:#4ade80">${driest.totalPrecip} mm</div>
-            <div class="s-sub">${driest.name}</div>
-        </div>`;
-
-    // Recommendation score: higher = better outdoor conditions
-    const scored = stats.map(s => ({
-        ...s,
-        score: s.avgTemp * 0.5 - s.maxWind * 0.6 - s.totalPrecip * 4 - (s.maxGust > 30 ? 12 : 0)
-    }));
-    const best = scored.reduce((a,b) => a.score > b.score ? a : b);
-    const tempF = best.currTemp;
-    const noRain = best.totalPrecip < 1;
-    const calmWind = best.maxWind < 7;
-
-    let emoji = '🌤', strong = '', detail = '';
-    if (noRain && calmWind && tempF > 16) {
-        emoji = '✅';
-        strong = `Best conditions right now: ${best.name}`;
-        detail = `Warm at ${tempF}°C, wind staying under ${best.maxWind} m/s, no significant rain in the next 48h. Great for outdoor activity.`;
-    } else if (!noRain) {
-        emoji = '🌧';
-        strong = `Rain expected — ${driest.name} is driest`;
-        detail = `${driest.name} has the least precipitation (${driest.totalPrecip} mm over 48h). Pack a rain jacket regardless.`;
-    } else if (!calmWind) {
-        emoji = '💨';
-        strong = `Windy conditions across all locations`;
-        detail = `${calmest.name} offers the calmest wind at ${calmest.currWind} m/s. Gusts up to ${windiest.maxGust} m/s expected at ${windiest.name}.`;
-    } else {
-        emoji = '🧥';
-        strong = `Cool temperatures — dress in layers`;
-        detail = `${warmest.name} is the warmest option at ${warmest.currTemp}°C. Wind is manageable at ${calmest.currWind} m/s in the calmest spot.`;
+    if (!loaded.length) {
+        grid.innerHTML = `<div class="insight-empty">Waiting on forecast data…</div>`;
+        if (head) head.innerHTML = '';
+        return;
     }
 
-    document.getElementById('recommendation-box').innerHTML = `
-        <div class="recommendation-box">
-            <div class="rec-icon">${emoji}</div>
-            <div class="rec-text"><strong>${strong}</strong><span>${detail}</span></div>
-        </div>`;
+    // Today in PT, formatted YYYY-MM-DD — matches what insights.js expects.
+    const today = (typeof ptDateStr === 'function')
+        ? ptDateStr(Date.now())
+        : new Date().toISOString().slice(0, 10);
 
-    // Comparison strip
-    const strip = stats.map(s =>
-        `<div class="compare-chip"><strong>${s.name}</strong> · ${s.currTemp}°C · ${s.currWind} m/s wind · ${s.totalPrecip}mm rain</div>`
-    ).join('');
-    document.getElementById('compare-strip').innerHTML = strip;
+    let verdicts = [];
+    try {
+        verdicts = INSIGHTS.scoreAllLocations(loaded, weatherData, today);
+    } catch (e) {
+        console.error('[insights] scoring failed:', e);
+        grid.innerHTML = `<div class="insight-empty">Scoring error — see console.</div>`;
+        return;
+    }
 
-    // Stability Forecast panel — compares Now / Next Weekend / Weekend After
-    // across all loaded locations and ranks them on stable-weather criteria
-    // (no heavy rain, no temp swings/heat, calm morning wind <5 m/s).
-    renderStabilityForecast();
+    // Header: weekend label + tiny "as of" line. Kept compact.
+    if (head) {
+        let weekendLabel = '';
+        try {
+            const wkend = INSIGHTS.getWeekend(today);
+            if (wkend && wkend.length) {
+                const first = new Date(wkend[0] + 'T12:00:00Z')
+                    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const last  = new Date(wkend[wkend.length - 1] + 'T12:00:00Z')
+                    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                weekendLabel = wkend.length === 1 ? first : `${first} – ${last}`;
+            }
+        } catch (e) { /* non-fatal */ }
+        head.innerHTML = `
+            <span class="ih-window">Best window per lake · Fri–Sun ${weekendLabel ? '(' + weekendLabel + ')' : ''}</span>
+            <span>Top of list = best score · cards account for trend, pressure, wind, rain, season, and your time prefs</span>
+        `;
+    }
+
+    if (!verdicts.length) {
+        grid.innerHTML = `<div class="insight-empty">No weekend windows in the forecast horizon.</div>`;
+        return;
+    }
+
+    const medals = ['🥇', '🥈', '🥉'];
+    grid.innerHTML = verdicts.map((v, i) => {
+        const rank   = medals[i] || `${i + 1}.`;
+        const scoreCls = insightScoreClass(v.score);
+        const modeCls  = v.mode === 'active' ? '' : 'ambush';
+        const modeIcon = v.mode === 'active' ? '⚡' : '🪨';
+        const modeLabel = v.mode === 'active' ? 'Active mode' : 'Ambush mode';
+        const reasons = (v.reasons || []).map(r => `
+            <li class="insight-reason">
+                <div>
+                    ${r.signal}
+                    ${r.why ? `<span class="ir-why">${r.why}</span>` : ''}
+                </div>
+            </li>`).join('');
+        return `
+            <div class="insight-card rank-${i + 1}">
+                <div class="insight-head">
+                    <span class="insight-rank">${rank}</span>
+                    <span class="insight-name">${v.loc.name}</span>
+                    <span class="insight-score ${scoreCls}">${v.score.toFixed(0)}</span>
+                </div>
+                <div class="insight-window">📍 ${fmtInsightsWindow(v.window)}</div>
+                <span class="insight-mode ${modeCls}">${modeIcon} Bass: ${modeLabel}</span>
+                <ul class="insight-reasons">${reasons}</ul>
+            </div>`;
+    }).join('');
 }
 
 // ── Stability Forecast ────────────────────────────────────────────────────────
