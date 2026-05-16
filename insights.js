@@ -84,7 +84,9 @@
         temp_trend: {
             up_strong:   'bass move shallower, feed aggressively',
             up:          'bass move shallower, feed more aggressively',
-            flat:        'pattern holds — fish where the calendar says',
+            soft_up:     'modest warmup — bass shading toward shallower lies',
+            flat:        'no thermal trigger — fish hold seasonal depth',
+            soft_down:   'modest cooldown — bass shading deeper, bite mellows',
             down:        'bass move deeper, bite softens',
             down_strong: 'bite shuts down for 24–48h',
             sudden_drop: '24h cold front — bite shuts down for 24–48h'
@@ -93,7 +95,7 @@
             storm_front:     'major front incoming — bite intense but short',
             pre_front:       'pre-frontal feeding window — best window of the week',
             soft_fall:       'pressure trending down — modest signal',
-            stable:          'baseline pattern — fish where the calendar says',
+            stable:          'no front in play — neither feeding push nor shutdown',
             post_front_soft: 'post-front recovery — bite still softer than baseline',
             bluebird:        'bluebird high — toughest fishing of the season'
         },
@@ -143,7 +145,9 @@
         if (rule === 'temp_trend') {
             if (direction === 'up_strong')                                        return 'good';
             if (direction === 'up')                                               return 'good-mild';
+            if (direction === 'soft_up')                                          return 'good-mild';
             if (direction === 'flat')                                             return 'neutral';
+            if (direction === 'soft_down')                                        return 'warn';
             if (direction === 'down')                                             return 'warn';
             if (direction === 'down_strong' || direction === 'sudden_drop')       return 'bad';
             return 'neutral';
@@ -326,11 +330,18 @@
         }
         const dampened = deltaC * 0.7; // water-temp proxy
 
-        if (dampened > 3)   return { mul: 1.30, direction: 'up_strong',   deltaC: dampened };
-        if (dampened > 1.5) return { mul: 1.15, direction: 'up',          deltaC: dampened };
-        if (dampened > -1.5)return { mul: 1.00, direction: 'flat',        deltaC: dampened };
-        if (dampened > -3)  return { mul: 0.85, direction: 'down',        deltaC: dampened };
-        return                    { mul: 0.50, direction: 'down_strong', deltaC: dampened };
+        // 7-band classifier — mirrors pressure's 3-tier-per-side sensitivity.
+        // The middle ±0.5°C "flat" zone is true noise; ±0.5–1.5 captures the
+        // metabolic-drift signal (bass shading shallower/deeper without a
+        // hard feeding-push trigger); ±1.5–3 is the framework's "modest
+        // signal" tier; >±3 is the strong-trigger / shutdown tier.
+        if (dampened >  3.0) return { mul: 1.30, direction: 'up_strong',   deltaC: dampened };
+        if (dampened >  1.5) return { mul: 1.15, direction: 'up',          deltaC: dampened };
+        if (dampened >  0.5) return { mul: 1.05, direction: 'soft_up',     deltaC: dampened };
+        if (dampened > -0.5) return { mul: 1.00, direction: 'flat',        deltaC: dampened };
+        if (dampened > -1.5) return { mul: 0.95, direction: 'soft_down',   deltaC: dampened };
+        if (dampened > -3.0) return { mul: 0.85, direction: 'down',        deltaC: dampened };
+        return                     { mul: 0.50, direction: 'down_strong', deltaC: dampened };
     }
 
     // ── Step 3: pressure multiplier (the veto-power one) ────────────────────
@@ -347,11 +358,12 @@
     // tier. Anything inside this band shouldn't drive recommendations.
     function pressureMultiplier(internalData, windowTsIdx) {
         const ts = internalData.timestamps;
-        // Prefer the frozen Windy snapshot (set by processLocalData on the
-        // local-ECMWF view) so the engine scores a single, consistent forecast.
-        // For API-model views (GFS / NAM / ECMWF-API) pressure_windy is
-        // undefined — fall through to the API's pressure for those.
-        const p  = internalData.pressure_windy || internalData.pressure;
+        // Pressure now comes from Open-Meteo for every model view (local
+        // ECMWF, ECMWF API, GFS, NAM) — Windy no longer scrapes pressure.
+        // The old `pressure_windy` frozen-snapshot path was removed; trying
+        // to prefer it produced an all-null array → every window scored
+        // "stable" regardless of the actual forecast.
+        const p  = internalData.pressure;
         const targetTs = ts[windowTsIdx];
         const twelveHrMs = 12 * 3600 * 1000;
         // Find the index closest to (targetTs - 12h).
@@ -519,16 +531,17 @@
             pushReason('fishability', fish.level, label, RULE_WHYS.fishability[fish.level] || '');
         }
 
-        // Pressure — highest-leverage bass signal. Always surfaced (including
-        // stable), so a quiet pressure reading doesn't look like missing data
-        // on the card. Framework treats stable as actionable info too:
-        // "fish where the calendar says."
-        pushReason('pressure', press.direction, pressureSignalText(press), RULE_WHYS.pressure[press.direction] || '');
+        // Display order: temp → pressure → wind → rain.
+        // Temp + pressure always surface (including flat / stable), so a
+        // quiet reading doesn't look like missing data on the card. The
+        // framework treats baselines as actionable info too: "fish where
+        // the calendar says."
+
         // Temp trend.
-        if (trend.direction !== 'flat') {
-            pushReason('temp_trend', trend.direction, tempSignalText(trend), RULE_WHYS.temp_trend[trend.direction] || '');
-        }
-        // Wind — include compass action.
+        pushReason('temp_trend', trend.direction, tempSignalText(trend), RULE_WHYS.temp_trend[trend.direction] || '');
+        // Pressure — highest-leverage bass signal.
+        pushReason('pressure', press.direction, pressureSignalText(press), RULE_WHYS.pressure[press.direction] || '');
+        // Wind — suppressed on truly quiet days (light AND |score| < 5).
         if (wind.direction !== 'light' || Math.abs(wind.score) >= 5) {
             const action = wind.compass && wind.score > 0 ? ` — fish the ${wind.compass} bank` : '';
             pushReason('wind', wind.direction, `${windDescriptor(wind)} (${wind.wind_ms.toFixed(0)} m/s)${action}`, RULE_WHYS.wind[wind.direction] || '');
@@ -646,13 +659,18 @@
     }
 
     function tempSignalText(trend) {
-        const d = trend.deltaC.toFixed(1);
-        const sign = trend.deltaC >= 0 ? '+' : '';
+        // Mirror pressureSignalText's format: "Temp ↑ 1.7°C/3d (est. water)"
+        // and "Temp flat" — arrow carries direction so we drop the leading
+        // +/- sign and the "Rising / Falling" prefix. "(est. water)" is kept
+        // as a methodology note (the deltaC is already dampened to ~0.7× of
+        // the air-temp swing to approximate lake water response).
+        if (trend.direction === 'flat') return 'Temp flat';
+        const d = Math.abs(trend.deltaC).toFixed(1);
+        const arrow = trend.deltaC >= 0 ? '↑' : '↓';
         if (trend.direction === 'sudden_drop') {
-            return `24h temp drop (${sign}${d}°C est. water)`;
+            return `Temp ↓ ${d}°C/24h (est. water)`;
         }
-        const dir = trend.deltaC > 0 ? 'Rising' : 'Falling';
-        return `${dir} 3-day temp trend (${sign}${d}°C est. water)`;
+        return `Temp ${arrow} ${d}°C/3d (est. water)`;
     }
 
     function windDescriptor(wind) {
@@ -663,11 +681,123 @@
         return `Light ${wind.compass || ''} wind`.trim();
     }
 
+    // ── Weekly outlook: macro pattern across the forecast horizon ──────────
+    //
+    // Different job from scoreLocation: that one scores discrete weekend
+    // windows for biology (3-day BACKWARD trend feeds the multiplier — what
+    // bass have already metabolized). This one finds the WEEK-LEVEL pattern
+    // across the FORWARD horizon (warming, cooling, midweek peak, front
+    // passage, steady) and ranks lakes by range so the dashboard can name
+    // which lake is most/least impacted by the macro pattern.
+    //
+    // Returns null when there isn't enough data (< 3 forward days, < 2 lakes).
+    function weeklyOutlook(locationsArr, weatherDataMap, todayISO) {
+        const perLake = [];
+
+        for (const loc of locationsArr) {
+            const data = weatherDataMap[loc.id];
+            if (!data || !data.timestamps) continue;
+
+            const buckets = new Map();
+            for (let i = 0; i < data.timestamps.length; i++) {
+                const d = new Date(data.timestamps[i]);
+                const pdt = new Date(d.getTime() - 7 * 3600 * 1000);
+                const iso = toISODate(pdt);
+                if (iso < todayISO) continue; // forward-looking only
+                if (!buckets.has(iso)) buckets.set(iso, []);
+                buckets.get(iso).push(kToC(data.temp[i]));
+            }
+
+            const means = new Map();
+            for (const [iso, arr] of buckets) {
+                means.set(iso, arr.reduce((a, b) => a + b, 0) / arr.length);
+            }
+            if (means.size < 3) continue;
+
+            let minC = Infinity, maxC = -Infinity, peakDay = null, valleyDay = null;
+            for (const [iso, m] of means) {
+                if (m > maxC) { maxC = m; peakDay = iso; }
+                if (m < minC) { minC = m; valleyDay = iso; }
+            }
+            perLake.push({
+                loc, minC, maxC, peakDay, valleyDay,
+                range: maxC - minC,
+                dayList: [...means.keys()].sort()
+            });
+        }
+
+        if (perLake.length < 2) return null;
+
+        const sorted = [...perLake].sort((a, b) => b.range - a.range);
+        const mostImpacted  = sorted[0];
+        const leastImpacted = sorted[sorted.length - 1];
+
+        // Use the most-impacted lake's curve as the pattern reference — that's
+        // where the macro signal shows up clearest. Other lakes have flatter
+        // versions of the same shape.
+        const ref       = mostImpacted;
+        const dayList   = ref.dayList;
+        const total     = dayList.length;
+        const peakIdx   = dayList.indexOf(ref.peakDay);
+        const valleyIdx = dayList.indexOf(ref.valleyDay);
+
+        // Pattern classification.
+        // "warming" = peak in last two days AND valley in first two days
+        // "cooling" = mirror
+        // "midweek_peak" = peak strictly interior (front buildup-and-pass)
+        // "midweek_valley" = valley strictly interior (front passage proper)
+        // "steady" = total range < 2°C (no macro signal)
+        // "mixed" = anything else (shape doesn't fit a named pattern)
+        let pattern;
+        if (ref.range < 2.0) {
+            pattern = 'steady';
+        } else if (peakIdx >= total - 2 && valleyIdx <= 1) {
+            pattern = 'warming';
+        } else if (valleyIdx >= total - 2 && peakIdx <= 1) {
+            pattern = 'cooling';
+        } else if (peakIdx > 0 && peakIdx < total - 1) {
+            pattern = 'midweek_peak';
+        } else if (valleyIdx > 0 && valleyIdx < total - 1) {
+            pattern = 'midweek_valley';
+        } else {
+            pattern = 'mixed';
+        }
+
+        // Only show the lake-impact comparison when there's real divergence.
+        // If most and least are within 1°C of each other, all lakes are
+        // moving together and the callout would feel forced.
+        const showSpread = (mostImpacted.range - leastImpacted.range) >= 1.0;
+
+        // Horizon-edge detection: if the peak / valley lands on the LAST day
+        // of the forecast window, we can't honestly claim it's the apex —
+        // the curve might still be climbing (or falling) past our data.
+        // Renderer uses these flags to swap to honest copy ("through end of
+        // forecast") and to mark the day name with a continuation arrow.
+        const peakAtHorizon   = peakIdx   === total - 1;
+        const valleyAtHorizon = valleyIdx === total - 1;
+
+        return {
+            pattern,
+            peakDay:   ref.peakDay,
+            peakC:     ref.maxC,
+            valleyDay: ref.valleyDay,
+            valleyC:   ref.minC,
+            rangeC:    ref.range,
+            showSpread,
+            peakAtHorizon,
+            valleyAtHorizon,
+            mostImpacted:  { name: mostImpacted.loc.name,  rangeC: mostImpacted.range  },
+            leastImpacted: { name: leastImpacted.loc.name, rangeC: leastImpacted.range },
+            dayList
+        };
+    }
+
     // ── Expose ──────────────────────────────────────────────────────────────
 
     const INSIGHTS = {
         scoreLocation,
         scoreAllLocations,
+        weeklyOutlook,
         getWeekend,
         // Exposed for tests + tuning:
         _internal: {

@@ -229,6 +229,59 @@
            pull the eye; everything else matches the rest of the dashboard's
            card visual language (dark fill, blue-grey border, blue accents).
            ────────────────────────────────────────────────────────────────── */
+        /* Weekly outlook strip — macro pattern view above the weekend cards.
+           Left border carries the pattern semantics (warming = orange,
+           cooling = blue, etc.) so the eye can scan the colour before
+           reading prose. */
+        .weekly-outlook {
+            margin-bottom: 14px;
+            padding: 12px 16px;
+            background: rgba(20, 35, 55, 0.45);
+            border: 1px solid #1e3048;
+            border-left: 3px solid #4a7a9a;
+            border-radius: 10px;
+        }
+        .weekly-outlook .wo-label {
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #4a7a9a;
+            margin-bottom: 4px;
+        }
+        .weekly-outlook .wo-headline {
+            font-size: 14px;
+            color: #d6e6f4;
+            line-height: 1.4;
+        }
+        .weekly-outlook .wo-headline strong { color: #fff; font-weight: 600; }
+        .weekly-outlook .wo-impact {
+            font-size: 12px;
+            color: #7aa8c8;
+            margin-top: 6px;
+        }
+        .weekly-outlook .wo-impact strong { color: #d6e6f4; font-weight: 600; }
+        /* Horizon-edge cues — used when the peak/valley sits on the last
+           day of the forecast (trend likely continues past visible data). */
+        .weekly-outlook .wo-arrow {
+            display: inline-block;
+            margin-left: 2px;
+            color: #d97b3a;
+            font-weight: 600;
+        }
+        .weekly-outlook .wo-horizon-note {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #7a96b0;
+            font-style: italic;
+        }
+        .weekly-outlook.warming        { border-left-color: #d97b3a; }
+        .weekly-outlook.cooling        { border-left-color: #5a9bd4; }
+        .weekly-outlook.midweek_peak   { border-left-color: #c87a4a; }
+        .weekly-outlook.midweek_valley { border-left-color: #6aa8c8; }
+        .weekly-outlook.steady         { border-left-color: #4a7a9a; }
+        .weekly-outlook.mixed          { border-left-color: #8a8aa8; }
+
         .insights-head {
             display: flex;
             justify-content: space-between;
@@ -1373,6 +1426,10 @@
             <span class="section-chevron">▼</span>
         </div>
         <div class="summary-body" id="summary-body">
+            <!-- Weekly outlook strip — macro pattern across the forecast horizon.
+                 Sits above the weekend cards to set context. Hidden by JS when
+                 there isn't enough data (< 3 forward days or < 2 lakes). -->
+            <div class="weekly-outlook" id="weekly-outlook" style="display:none"></div>
             <div class="insights-head" id="insights-head"></div>
             <div class="insights-grid" id="insights-grid">
                 <div class="loading-state" style="grid-column:1/-1; padding:16px">
@@ -1899,7 +1956,7 @@ function approxSunTimes(lat, lon, dateStr) {
 // Converts one entry from window.FORECAST_DATA.locations into the same internal
 // shape that processData() returns, so all downstream rendering code works as-is.
 function processLocalData(entry) {
-    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [], pressure = [];
+    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [];
     // PDT = UTC-7, PST = UTC-8. Detect from the generated timestamp if present,
     // otherwise default to -7 (ECMWF task runs in summer/spring).
     const tzOffset = 7; // hours behind UTC
@@ -1935,24 +1992,21 @@ function processLocalData(entry) {
             // WMO codes + cloud-cover % so weatherGlyph() and cloudBg() work as-is.
             cloud.push((day.cloud_pct      || [])[i] ?? null);
             wcode.push((day.wmo_code       || [])[i] ?? null);
-            pressure.push((day.pressure_mmhg || [])[i] ?? null);  // already mmHg
+            // pressure intentionally not seeded here — mergeSupplementary()
+            // builds it from Open-Meteo, which is now the only pressure source.
+            // The old `pressure_windy` frozen snapshot was removed when Windy
+            // stopped providing pressure data; leaving it in caused the
+            // insights engine to score every window as "stable" (null delta).
         }
     }
     const n = timestamps.length;
     return {
         timestamps, windSpeed, windDir, gusts, temp, precip,
-        // rh, cloud_base, uv_index are null here — filled by mergeSupplementary()
+        // rh, cloud_base, uv_index, pressure are null here — filled by mergeSupplementary()
         rh:         new Array(n).fill(null),
         cloud,
         wcode,
-        pressure,
-        // Frozen snapshot of Windy pressure — preserved past mergeSupplementary()
-        // so the insights engine can score against pure-Windy data while the UI
-        // cards keep displaying fresher Open-Meteo values. Why two copies: the
-        // insights model wants a single, consistent forecast source (matches
-        // the harness output), while the live UI benefits from the fresher
-        // Open-Meteo updates between weekly Windy scrapes.
-        pressure_windy: pressure.slice(),
+        pressure:   new Array(n).fill(null),
         cloud_base: new Array(n).fill(null),
         uv_index:   new Array(n).fill(null),
         sunByDate,
@@ -3365,7 +3419,96 @@ function insightScoreClass(score) {
     return 'bad';                    // red
 }
 
+// Weekly outlook renderer — picks up macro pattern data from INSIGHTS.weeklyOutlook
+// and composes a single readable line. Hidden when the engine returns null
+// (not enough data). Kept here (not in insights.js) so the prose / day-name
+// formatting stays in the rendering layer.
+function renderWeeklyOutlook() {
+    const el = document.getElementById('weekly-outlook');
+    if (!el) return;
+    if (typeof INSIGHTS === 'undefined' || !INSIGHTS.weeklyOutlook) {
+        el.style.display = 'none';
+        return;
+    }
+    const loaded = locations.filter(l => weatherData[l.id]);
+    if (loaded.length < 2) { el.style.display = 'none'; return; }
+
+    const today = (typeof ptDateStr === 'function')
+        ? ptDateStr(Date.now())
+        : new Date().toISOString().slice(0, 10);
+
+    let outlook;
+    try {
+        outlook = INSIGHTS.weeklyOutlook(loaded, weatherData, today);
+    } catch (e) {
+        console.error('[outlook] computation failed:', e);
+        el.style.display = 'none';
+        return;
+    }
+    if (!outlook) { el.style.display = 'none'; return; }
+
+    // ISO date → short day name (Sun..Sat) for prose.
+    const dayName = iso => {
+        const [y, m, d] = iso.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d, 12));
+        return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
+    };
+
+    // Horizon-edge handling: when the peak / valley sits on the last day of
+    // the forecast, we can't claim it's an apex — the trend likely continues
+    // past our visible data. Swap copy to be honest about that, and append a
+    // ↗ / ↘ marker after the day name as a visual cue.
+    const horizonNote = `<span class="wo-horizon-note">Forecast ends here; trend likely continues past horizon.</span>`;
+    let headline = '';
+    switch (outlook.pattern) {
+        case 'warming':
+            if (outlook.peakAtHorizon) {
+                headline = `<strong>Warming through end of forecast</strong> — climbing ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.valleyDay)}, hitting ${outlook.peakC.toFixed(0)}°C on ${dayName(outlook.peakDay)} <span class="wo-arrow">↗</span>. ${horizonNote}`;
+            } else {
+                headline = `<strong>Warming through ${dayName(outlook.peakDay)}</strong> — peak ${outlook.peakC.toFixed(0)}°C, climbing ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.valleyDay)}.`;
+            }
+            break;
+        case 'cooling':
+            if (outlook.valleyAtHorizon) {
+                headline = `<strong>Cooling through end of forecast</strong> — dropping ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.peakDay)}, hitting ${outlook.valleyC.toFixed(0)}°C on ${dayName(outlook.valleyDay)} <span class="wo-arrow">↘</span>. ${horizonNote}`;
+            } else {
+                headline = `<strong>Cooling through ${dayName(outlook.valleyDay)}</strong> — low ${outlook.valleyC.toFixed(0)}°C, dropping ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.peakDay)}.`;
+            }
+            break;
+        case 'midweek_peak':
+            headline = `<strong>Peak heat ${dayName(outlook.peakDay)}</strong> (${outlook.peakC.toFixed(0)}°C) — cooler bracketing it. Front buildup.`;
+            break;
+        case 'midweek_valley':
+            headline = `<strong>Cool dip ${dayName(outlook.valleyDay)}</strong> (${outlook.valleyC.toFixed(0)}°C) — warmer either side. Front passage.`;
+            break;
+        case 'steady':
+            headline = `<strong>Steady week</strong> — daily means hold within ${outlook.rangeC.toFixed(1)}°C. No macro signal.`;
+            break;
+        case 'mixed':
+        default:
+            headline = `<strong>Mixed pattern</strong> — no single weekly trend; lakes diverge.`;
+            break;
+    }
+
+    // Most/least lake callout — only when there's real divergence between lakes
+    // (>= 1°C spread between most and least impacted), and the week itself is
+    // moving (steady patterns wouldn't have meaningful divergence to report).
+    let impactLine = '';
+    if (outlook.showSpread && outlook.pattern !== 'steady') {
+        impactLine = `Most affected: <strong>${outlook.mostImpacted.name}</strong> (${outlook.mostImpacted.rangeC.toFixed(1)}°C swing) · Least: <strong>${outlook.leastImpacted.name}</strong> (${outlook.leastImpacted.rangeC.toFixed(1)}°C)`;
+    }
+
+    el.className = `weekly-outlook ${outlook.pattern}`;
+    el.style.display = '';
+    el.innerHTML = `
+        <div class="wo-label">Weekly outlook</div>
+        <div class="wo-headline">${headline}</div>
+        ${impactLine ? `<div class="wo-impact">${impactLine}</div>` : ''}
+    `;
+}
+
 function renderInsights() {
+    renderWeeklyOutlook();
     const head = document.getElementById('insights-head');
     const grid = document.getElementById('insights-grid');
     if (!grid) return;
