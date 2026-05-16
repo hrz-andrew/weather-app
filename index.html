@@ -304,6 +304,21 @@
             display: flex;
             align-items: center;
             gap: 6px;
+            flex-wrap: wrap;
+        }
+        .insight-window .iw-or {
+            font-size: 11px;
+            font-weight: 500;
+            color: #7aa8c8;
+            opacity: 0.45;
+            letter-spacing: 0.04em;
+            text-transform: lowercase;
+        }
+        .insight-window .iw-alt {
+            font-size: 13px;
+            font-weight: 500;
+            color: #7aa8c8;
+            opacity: 0.65;
         }
         .insight-mode {
             display: inline-flex;
@@ -340,7 +355,7 @@
             display: grid;
             grid-template-columns: 10px 1fr;
             gap: 8px;
-            /* Default dot — neutral; overridden by .r-good / .r-soso / .r-bad. */
+            /* Default dot — slate; overridden by .r-good / .r-good-mild / .r-neutral / .r-warn / .r-bad. */
             --dot: #4a7a9a;
         }
         .insight-reason::before {
@@ -356,9 +371,14 @@
                needing a thicker outline. Matches the score-pill palette. */
             box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot) 18%, transparent);
         }
-        .insight-reason.r-good { --dot: #4ade80; }   /* green — positive signal */
-        .insight-reason.r-soso { --dot: #fbbf24; }   /* amber — mild headwind */
-        .insight-reason.r-bad  { --dot: #f87171; }   /* red   — strong negative */
+        /* 5-tier polarity spectrum: bad ← warn ← neutral → good-mild → good.
+           Yellow now means "warning" (headwind), not "no signal" — the calm
+           slate dot owns the baseline so we don't conflate the two states. */
+        .insight-reason.r-good      { --dot: #4ade80; }   /* green        — strong positive */
+        .insight-reason.r-good-mild { --dot: #86efac; }   /* pale green   — direction right, mild */
+        .insight-reason.r-neutral   { --dot: #94a3b8; }   /* slate        — true baseline */
+        .insight-reason.r-warn      { --dot: #fbbf24; }   /* amber        — mild headwind */
+        .insight-reason.r-bad       { --dot: #f87171; }   /* red          — strong negative */
         .insight-reason .ir-why {
             display: block;
             font-size: 11px;
@@ -1349,7 +1369,7 @@
          by INSIGHTS.scoreAllLocations() into the upcoming Fri–Sun window. -->
     <div class="summary-section" id="summary-section">
         <div class="section-title" onclick="toggleSummary()">
-            🎣 Bass Fishing Insights
+            🎣 Upcoming Weekend Insights
             <span class="section-chevron">▼</span>
         </div>
         <div class="summary-body" id="summary-body">
@@ -3392,7 +3412,7 @@ function renderInsights() {
         } catch (e) { /* non-fatal */ }
         head.innerHTML = `
             <span class="ih-window">Best window per lake · Fri–Sun ${weekendLabel ? '(' + weekendLabel + ')' : ''}</span>
-            <span>Top of list = best score · cards account for trend, pressure, wind, rain, season, and your time prefs</span>
+            <span>Top of list = best score · cards account for trend, pressure, wind, rain, and your time prefs</span>
         `;
     }
 
@@ -3426,7 +3446,10 @@ function renderInsights() {
                     <span class="insight-name">${v.loc.name}</span>
                     <span class="insight-score ${scoreCls}">${v.score.toFixed(0)}</span>
                 </div>
-                <div class="insight-window">${fmtInsightsWindow(v.window)}</div>
+                <div class="insight-window">
+                    <span>${fmtInsightsWindow(v.window)}</span>
+                    ${v.alternateWindow ? `<span class="iw-or">or</span><span class="iw-alt">${fmtInsightsWindow(v.alternateWindow)}</span>` : ''}
+                </div>
                 <span class="insight-mode ${modeCls}">Bass: ${modeLabel}</span>
                 <ul class="insight-reasons">${reasons}</ul>
             </div>`;

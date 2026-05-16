@@ -13,10 +13,9 @@
 //   INSIGHTS.scoreLocation(loc, internalData, today)  → verdict object
 //   INSIGHTS.scoreAllLocations(locs, weatherData, today) → ranked array
 //   INSIGHTS.getWeekend(today)                        → next Fri/Sat/Sun dates
-//   INSIGHTS.seasonBucket(date)                       → 'post_spawn' | ...
 //
-// Math architecture (matches the framework):
-//   base       = seasonalWindowQuality(date, hour)       — Step 6
+// Math architecture:
+//   base       = neutralWindowQuality(hour)               — universal crepuscular curve
 //   trend_mul  = tempTrendMultiplier(temp history)        — Step 2  (multiplicative)
 //   front_mul  = pressureMultiplier(pressure trajectory)  — Step 3  (multiplicative — has veto power)
 //   bonuses    = windScore + rainScore                    — Steps 4 + 5  (additive)
@@ -24,8 +23,15 @@
 //   mode       = classifyMode(...)                        — Step 1  (derived, not scored)
 //
 // Multiplicative + additive is intentional: a passing front should kill an
-// otherwise-perfect day (multiply by 0.2), but a windy day shouldn't single-
-// handedly save a bad-season hour (it's a bonus, not a multiplier).
+// otherwise-perfect day (multiply by 0.35), but a windy day shouldn't single-
+// handedly save a bad-bite hour (it's a bonus, not a multiplier).
+//
+// NOTE: seasonal modulation is intentionally absent. The framework's Step 6
+// (season-tuned hour curves) is left as a user-side judgment — the engine
+// scores the environmental data, the user reads the calendar. The neutral
+// curve below is the universal crepuscular pattern (Section 1: bass are
+// always crepuscular; the *intensity* varies by season — that variation is
+// the user's call, not the engine's).
 // ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
@@ -51,9 +57,9 @@
     // Eventually this could move to its own file or come from UI settings,
     // but for v1 it lives here as a constant.
     const USER_AVAILABILITY = {
-        5: { preferred: [11, 21], label: 'Friday midday–evening' },
-        6: { preferred: [5,  11], label: 'Saturday morning' },
-        0: { preferred: [5,  11], label: 'Sunday morning' }
+        5: { preferred: [13, 21], label: 'Friday afternoon–evening' },  // 1pm–9pm
+        6: { preferred: [5,  21], label: 'Saturday all day' },           // dawn–dusk
+        0: { preferred: [5,  14], label: 'Sunday morning–early afternoon' }  // dawn–2pm
     };
 
     function availabilityMultiplier(dayOfWeek, hour) {
@@ -76,39 +82,31 @@
     // touching the scoring math, and so the same string serves every lake.
     const RULE_WHYS = {
         temp_trend: {
-            up_strong:  'bass move shallower, feed aggressively',
-            up:         'bass move shallower, feed more aggressively',
-            flat:       'pattern holds — fish where the season says',
-            down:       'bass move deeper, bite softens',
-            down_strong:'bite shuts down for 24–48h'
+            up_strong:   'bass move shallower, feed aggressively',
+            up:          'bass move shallower, feed more aggressively',
+            flat:        'pattern holds — fish where the calendar says',
+            down:        'bass move deeper, bite softens',
+            down_strong: 'bite shuts down for 24–48h',
+            sudden_drop: '24h cold front — bite shuts down for 24–48h'
         },
         pressure: {
-            pre_front:  'feeding window opens — best window of the week',
-            stable:     'baseline pattern — fish where the season says',
-            slow_rise:  'pressure recovering — bite improving',
-            post_front: 'post-frontal — bite likely poor, skip if you can',
-            fresh_front:'sharp post-front rise — toughest fishing of the season'
+            storm_front:     'major front incoming — bite intense but short',
+            pre_front:       'pre-frontal feeding window — best window of the week',
+            soft_fall:       'pressure trending down — modest signal',
+            stable:          'baseline pattern — fish where the calendar says',
+            post_front_soft: 'post-front recovery — bite still softer than baseline',
+            bluebird:        'bluebird high — toughest fishing of the season'
         },
         wind: {
             ideal:    'riffles surface, concentrates bait, oxygenates',
             light:    'riffles surface, concentrates bait',
-            heavy:    'bite is on but technique is hard from shore',
+            strong:   'good bite, but heavier weights and shorter casts',
+            extreme:  'biology still positive but shore fishing very tough',
             calm:     'glass kills the bite outside dawn/dusk'
         },
         rain: {
             light:    'stains water mildly, washes food in',
-            heavy:    'fresh inflow — creek arms may be magic',
-            heavy_winter:'cold inflow — bite suppressed'
-        },
-        season: {
-            post_spawn_morning: 'post-spawn morning window — shallow males chasing',
-            post_spawn_evening: 'post-spawn evening window — topwater hour',
-            summer_dawn:        'summer dawn — only viable window before thermal cap',
-            summer_dusk:        'summer dusk — only viable window before thermal cap',
-            fall_feed:          'fall feed — bass loading up before winter',
-            spawn:              'spawn period — sight-fishing window',
-            pre_spawn:          'pre-spawn — bass staging shallow',
-            wintering:          'wintering — narrow midday-only window'
+            heavy:    'fresh inflow — creek arms may be magic (cold inflow penalty in winter)'
         },
         // Fishability — separate from bite quality. Bass may bite well in a
         // gusty pre-front window, but a shore angler can't physically fish it:
@@ -120,120 +118,69 @@
         }
     };
 
-    // Polarity map: every (rule, direction) → 'good' | 'soso' | 'bad'.
-    // This lets the renderer paint a color-coded dot per reason without
-    // re-deriving the scoring logic. Keep this aligned with how the rule
-    // affects the composite score (positive multiplier / bonus → good,
-    // neutral or mild penalty → soso, strong penalty → bad).
+    // Polarity map: every (rule, direction) → one of five tiers.
+    // The 5-tier system lets the dot color carry a real spectrum instead of
+    // collapsing "baseline / no signal" and "mild headwind" into the same
+    // amber bucket. Tiers, in order:
+    //   good       — strong positive signal (use the lake, plan the trip)
+    //   good-mild  — direction is right but signal is small (cautious yes)
+    //   neutral    — true baseline, no signal either way (calm grey)
+    //   warn       — mild headwind, conditions trending the wrong way
+    //   bad        — strong negative signal (skip or pivot)
+    // Keep this aligned with how each rule affects the composite score:
+    // a +0.15 multiplier should not look the same as a -0.50 multiplier.
     function polarityFor(rule, direction) {
         if (rule === 'fishability')  return 'bad';
         if (rule === 'lake_note')    return 'bad';
         if (rule === 'pressure') {
-            if (direction === 'pre_front')                                return 'good';
-            if (direction === 'slow_rise')                                return 'soso';
-            if (direction === 'post_front' || direction === 'fresh_front') return 'bad';
-            return 'soso';
+            if (direction === 'storm_front' || direction === 'pre_front')         return 'good';
+            if (direction === 'soft_fall')                                        return 'good-mild';
+            if (direction === 'stable')                                           return 'neutral';
+            if (direction === 'post_front_soft')                                  return 'warn';
+            if (direction === 'bluebird')                                         return 'bad';
+            return 'neutral';
         }
         if (rule === 'temp_trend') {
-            if (direction === 'up_strong' || direction === 'up')   return 'good';
-            if (direction === 'down')                              return 'soso';
-            if (direction === 'down_strong')                       return 'bad';
-            return 'soso';
+            if (direction === 'up_strong')                                        return 'good';
+            if (direction === 'up')                                               return 'good-mild';
+            if (direction === 'flat')                                             return 'neutral';
+            if (direction === 'down')                                             return 'warn';
+            if (direction === 'down_strong' || direction === 'sudden_drop')       return 'bad';
+            return 'neutral';
         }
         if (rule === 'wind') {
-            if (direction === 'ideal' || direction === 'light')    return 'good';
-            if (direction === 'heavy' || direction === 'calm')     return 'bad';
-            return 'soso';
+            if (direction === 'ideal')                                            return 'good';
+            if (direction === 'light' || direction === 'strong')                  return 'good-mild';
+            if (direction === 'extreme')                                          return 'warn';
+            if (direction === 'calm')                                             return 'bad';
+            return 'neutral';
         }
         if (rule === 'rain') {
-            if (direction === 'heavy_winter')                      return 'bad';
-            if (direction === 'light' || direction === 'heavy')    return 'good';
-            return 'soso';
+            if (direction === 'light')                                            return 'good';
+            if (direction === 'heavy')                                            return 'good-mild';
+            if (direction === 'none')                                             return 'neutral';
+            return 'neutral';
         }
-        // Season chips and anything else: neutral context.
-        return 'soso';
+        return 'neutral';
     }
 
-    // Season buckets and their per-hour-of-day window quality curves.
-    // Each curve is a 24-element array (hour 0-23). Numbers represent the base
-    // score (0-100) a 3-hour window centered on that hour starts with.
+    // Universal crepuscular hour curve (Step 1 of the framework — bass are
+    // ALWAYS crepuscular; intensity and width are the seasonal part, which
+    // the user owns). 24-element array, hour 0–23.
     //
-    // These curves encode Step 6 of the framework. Tune by experience.
-    const SEASONS = [
-        {
-            name: 'wintering',
-            months: [11, 12, 1, 2],
-            defaultMode: 'ambush',
-            // Only midday viable; water is coldest at dawn.
-            curve: [
-                0, 0, 0, 0, 0, 0,   //  0– 5
-                5, 10, 15, 25, 40, 50,  // 6–11
-                55, 50, 40, 25, 15, 10, // 12–17
-                5, 5, 0, 0, 0, 0    // 18–23
-            ]
-        },
-        {
-            name: 'pre_spawn',
-            months: [2, 3],
-            defaultMode: 'mixed',
-            // Broad daytime; lean midday-evening.
-            curve: [
-                0, 0, 0, 0, 5, 15,
-                30, 45, 55, 60, 65, 70,
-                72, 70, 65, 60, 55, 50,
-                40, 30, 15, 5, 0, 0
-            ]
-        },
-        {
-            name: 'spawn',
-            months: [3, 4],
-            defaultMode: 'mixed',
-            // Mid-morning to mid-afternoon, sight-dependent.
-            curve: [
-                0, 0, 0, 0, 5, 15,
-                30, 45, 55, 65, 72, 75,
-                75, 72, 65, 55, 45, 35,
-                25, 15, 10, 5, 0, 0
-            ]
-        },
-        {
-            name: 'post_spawn',
-            months: [4, 5],
-            defaultMode: 'active',
-            // BIMODAL: dawn + dusk peaks. Midday valley.
-            // Morning peak at hour 7 (~6:30am post-dawn shallow male window).
-            // Evening peak at hour 20 (~8pm "topwater hour" before May sunset).
-            curve: [
-                5, 5, 5, 10, 25, 50,
-                78, 85, 80, 60, 45, 38,
-                38, 40, 45, 50, 58, 68,
-                75, 82, 85, 60, 30, 15
-            ]
-        },
-        {
-            name: 'summer',
-            months: [6, 7, 8, 9],
-            defaultMode: 'conditional',
-            // Tight peaks dawn ±90min and dusk ±90min. Midday is brutal.
-            curve: [
-                5, 5, 10, 30, 60, 75,
-                80, 70, 50, 25, 15, 10,
-                10, 10, 10, 15, 25, 50,
-                70, 75, 65, 40, 20, 10
-            ]
-        },
-        {
-            name: 'fall',
-            months: [9, 10, 11],
-            defaultMode: 'active',
-            // Broad, mid-morning peak.
-            curve: [
-                5, 5, 5, 10, 25, 50,
-                65, 75, 80, 80, 75, 70,
-                65, 60, 55, 50, 45, 40,
-                30, 20, 10, 5, 0, 0
-            ]
-        }
+    // A 3-hour scoring window centered on hour H averages [H-1, H, H+1] from
+    // this curve to get its base score (0–100). The shape:
+    //   - dead overnight (0–3am, 10pm onward)
+    //   - sharp dawn ramp 4–7am, peak 6–7am
+    //   - midday lull 10am–2pm (still fishable, just not peak)
+    //   - dusk peak 6–8pm, sharp falloff
+    const NEUTRAL_HOUR_CURVE = [
+        0,  0,  0,  0,    //  0– 3
+        20, 55, 75, 80,   //  4– 7
+        70, 55, 45, 40,   //  8–11
+        40, 40, 45, 50,   // 12–15
+        55, 65, 75, 80,   // 16–19
+        70, 40, 15, 5     // 20–23
     ];
 
     // ── Pure helpers ─────────────────────────────────────────────────────────
@@ -302,44 +249,38 @@
         return all.filter(d => parseISODate(d) >= parseISODate(todayISO));
     }
 
-    // Return season bucket for a given ISO date.
-    function seasonBucket(isoDate) {
-        const d = parseISODate(isoDate);
-        const m = d.getUTCMonth() + 1; // 1–12
-        for (const s of SEASONS) {
-            if (s.months.includes(m)) return s;
-        }
-        return SEASONS[0]; // fallback
-    }
+    // ── Base score: universal crepuscular curve ──────────────────────────────
 
-    // ── Step 6: seasonal window quality ─────────────────────────────────────
-
-    // Score a 3-hour window centered on hourCenter (0-23) for the given date.
-    // Returns 0-100. This is the BASE score before multipliers and bonuses.
-    function seasonalWindowQuality(isoDate, hourCenter) {
-        const s = seasonBucket(isoDate);
-        // Average the curve across the 3-hour window (hourCenter-1, hourCenter, hourCenter+1).
+    // Score a 3-hour window centered on hourCenter (0-23). Returns 0-100.
+    // Date is unused — this is the season-agnostic base. (User reads the
+    // calendar themselves and adjusts mentally.)
+    function neutralWindowQuality(hourCenter) {
         const hours = [(hourCenter + 23) % 24, hourCenter, (hourCenter + 1) % 24];
-        const sum = hours.reduce((a, h) => a + s.curve[h], 0);
+        const sum = hours.reduce((a, h) => a + NEUTRAL_HOUR_CURVE[h], 0);
         return sum / 3;
     }
 
     // ── Step 2: temp-trend multiplier (uses air temp as water-temp proxy) ──
 
-    // Returns { mul: 0.5–1.3, direction: 'up_strong'|'up'|'flat'|'down'|'down_strong', deltaC }
+    // Returns { mul, direction, deltaC } where direction is one of:
+    //   up_strong | up | flat | down | down_strong | sudden_drop
     //
-    // We use air temp dampened ~70% as a stand-in for water temp. Water lags air
-    // by 3-5 days and responds with reduced amplitude, so the 3-day air-temp
-    // delta tells us about water-temp DIRECTION (which is what matters per Step 2)
-    // even if it overstates magnitude. We dampen the delta we report in the
-    // reason text so we're not lying to the user.
+    // We use air temp dampened ~70% as a stand-in for water temp. Water lags
+    // air by 3-5 days and responds with reduced amplitude, so the 3-day
+    // air-temp delta tells us about water-temp DIRECTION (which is what
+    // matters per Step 2) even if it overstates magnitude. We dampen the
+    // delta we report in the reason text so we're not lying to the user.
+    //
+    // The 24h sudden-drop check is intentionally SEPARATE from the 3-day
+    // trend. They're different time-constant signals — a 3-day trend is
+    // "what metabolic mode are bass in," a 24h drop is "did a front just pass
+    // through." Averaging them into one delta loses the front-event signal.
     function tempTrendMultiplier(internalData, targetIsoDate) {
         // Build a per-day mean air temp lookup from internalData.
         const dayMeans = new Map(); // isoDate → mean °C
         const buckets = new Map(); // isoDate → temps[]
         for (let i = 0; i < internalData.timestamps.length; i++) {
             const d = new Date(internalData.timestamps[i]);
-            // Convert UTC → PDT (-7) for date keying (matches forecast-data.js dates)
             const pdt = new Date(d.getTime() - 7 * 3600 * 1000);
             const iso = toISODate(pdt);
             if (!buckets.has(iso)) buckets.set(iso, []);
@@ -349,16 +290,29 @@
             dayMeans.set(iso, arr.reduce((a, b) => a + b, 0) / arr.length);
         }
 
-        // Look at the target day and the day 3 back.
         const target = parseISODate(targetIsoDate);
-        const back3  = toISODate(addDays(target, -3));
         const tMean  = dayMeans.get(targetIsoDate);
-        const bMean  = dayMeans.get(back3);
-
-        // If we don't have 3 days of history yet (early in the forecast), look at
-        // the earliest day we have and scale accordingly.
-        let deltaC, dampened;
         if (tMean == null) return { mul: 1.0, direction: 'flat', deltaC: 0 };
+
+        // ── 24h sudden-drop check (overrides 3-day trend if shutdown-grade) ─
+        // Framework: 5°F (2.8°C) water drop in 24h post-front → 24–48h shutdown.
+        // With 0.7 damping that's a ~4°C air-temp drop → dampened ~2.8°C drop.
+        // We trigger slightly more sensitive (−2.0 dampened) to catch the
+        // shoulder of the shutdown event, not just its center.
+        const back1 = toISODate(addDays(target, -1));
+        const bMean24 = dayMeans.get(back1);
+        if (bMean24 != null) {
+            const delta24 = (tMean - bMean24) * 0.7;
+            if (delta24 < -2.0) {
+                return { mul: 0.50, direction: 'sudden_drop', deltaC: delta24 };
+            }
+        }
+
+        // ── 3-day trend (the slower metabolic signal) ───────────────────────
+        const back3 = toISODate(addDays(target, -3));
+        const bMean = dayMeans.get(back3);
+
+        let deltaC;
         if (bMean == null) {
             // Use the earliest available day as a fallback baseline.
             let earliest = null, earliestIso = null;
@@ -370,23 +324,27 @@
         } else {
             deltaC = tMean - bMean;
         }
-        dampened = deltaC * 0.7; // water-temp proxy
+        const dampened = deltaC * 0.7; // water-temp proxy
 
         if (dampened > 3)   return { mul: 1.30, direction: 'up_strong',   deltaC: dampened };
-        if (dampened > 1)   return { mul: 1.15, direction: 'up',          deltaC: dampened };
-        if (dampened > -1)  return { mul: 1.00, direction: 'flat',        deltaC: dampened };
+        if (dampened > 1.5) return { mul: 1.15, direction: 'up',          deltaC: dampened };
+        if (dampened > -1.5)return { mul: 1.00, direction: 'flat',        deltaC: dampened };
         if (dampened > -3)  return { mul: 0.85, direction: 'down',        deltaC: dampened };
         return                    { mul: 0.50, direction: 'down_strong', deltaC: dampened };
     }
 
     // ── Step 3: pressure multiplier (the veto-power one) ────────────────────
 
-    // Returns { mul: 0.2–1.2, direction: 'pre_front'|'stable'|'slow_rise'|'post_front'|'fresh_front', delta12h }
+    // Returns { mul, direction, delta12h } where direction is one of:
+    //   storm_front | pre_front | soft_fall | stable | post_front_soft | bluebird
     //
-    // We look at pressure CHANGE over the 12 hours preceding the window.
-    // - Falling sharply → pre-front (best)
-    // - Stable          → baseline
-    // - Rising sharply  → post-front (worst, often "bluebird sky" next day)
+    // 12h delta of pressure preceding the scoring window. Thresholds map to
+    // the framework's 24h bands halved (e.g., framework's "falling 3–6 mmHg
+    // over 24h = pre-frontal sweet spot" → 1.5–4 mmHg over 12h here).
+    //
+    // The "stable" band (±0.75 mmHg/12h = ±1.5 mmHg/24h) matches the
+    // framework's explicit "drift <1.5 mmHg/24h = negligible, no signal"
+    // tier. Anything inside this band shouldn't drive recommendations.
     function pressureMultiplier(internalData, windowTsIdx) {
         const ts = internalData.timestamps;
         // Prefer the frozen Windy snapshot (set by processLocalData on the
@@ -409,34 +367,37 @@
         }
         const delta = pNow - pBack; // mmHg over 12h
 
-        if (delta < -1.5) return { mul: 1.20, direction: 'pre_front',   delta12h: delta };
-        if (delta < -0.3) return { mul: 1.08, direction: 'pre_front',   delta12h: delta };
-        if (delta <  0.3) return { mul: 1.00, direction: 'stable',      delta12h: delta };
-        if (delta <  1.5) return { mul: 0.70, direction: 'slow_rise',   delta12h: delta };
-        if (delta <  3.0) return { mul: 0.40, direction: 'post_front',  delta12h: delta };
-        return                  { mul: 0.20, direction: 'fresh_front', delta12h: delta };
+        if (delta < -4.0)  return { mul: 1.15, direction: 'storm_front',     delta12h: delta };
+        if (delta < -1.5)  return { mul: 1.20, direction: 'pre_front',       delta12h: delta };
+        if (delta < -0.75) return { mul: 1.05, direction: 'soft_fall',       delta12h: delta };
+        if (delta < +0.75) return { mul: 1.00, direction: 'stable',          delta12h: delta };
+        if (delta < +2.0)  return { mul: 0.85, direction: 'post_front_soft', delta12h: delta };
+        return                  { mul: 0.35, direction: 'bluebird',         delta12h: delta };
     }
 
     // ── Step 4: wind score (additive bonus) ─────────────────────────────────
 
-    // Returns { score: -20..+15, direction: 'ideal'|'light'|'heavy'|'calm', wind_ms, compass }
+    // Returns { score, direction, wind_ms, compass } where direction is one of:
+    //   ideal | light | strong | extreme | calm
     //
-    // Note on tuning: penalties here are calibrated for SHORE fishing.
-    // From-a-boat the curve would shift right (5–8 m/s still excellent), but
-    // Andrew fishes from the bank, so 7+ m/s is where casting/standing starts
-    // to fall apart — hence the steeper negative slope after that. Gusts are
-    // handled separately by fishabilityMultiplier (multiplicative veto), not
-    // here, because a gust-only spike shouldn't double-penalize sustained wind.
+    // CRITICAL: this function scores BIOLOGY only (does wind help or hurt the
+    // bite). The fishability multiplier below scores PHYSICS (can a shore
+    // angler actually cast in this). Framework Step 4 explicitly says 7+ m/s
+    // is biologically GOOD ("the fishing is good if you can manage heavier
+    // weights and shorter casts") — only the human casting side suffers. So
+    // this function stays positive across 7–13 m/s; fishabilityMultiplier
+    // carries the cost of the rough water on the angler.
     function windScore(windMs, gusts, windDir, hourCenter) {
         const dir = compassFromBearing(windDir);
         const isLowLight = (hourCenter <= 7 || hourCenter >= 18);
         if (windMs == null) return { score: 0, direction: 'light', wind_ms: 0, compass: null };
 
-        if (windMs >= 2 && windMs <= 5) return { score: 15, direction: 'ideal', wind_ms: windMs, compass: dir };
-        if (windMs > 5  && windMs <= 7) return { score: 5,  direction: 'light', wind_ms: windMs, compass: dir };
-        if (windMs > 7  && windMs <= 10) return { score: -8, direction: 'heavy', wind_ms: windMs, compass: dir };
-        if (windMs > 10) return { score: -20, direction: 'heavy', wind_ms: windMs, compass: dir };
-        if (windMs < 1)  return { score: isLowLight ? 0 : -8, direction: 'calm', wind_ms: windMs, compass: dir };
+        if (windMs >= 2  && windMs <= 5)  return { score: 15, direction: 'ideal',   wind_ms: windMs, compass: dir };
+        if (windMs > 5   && windMs <= 7)  return { score: 12, direction: 'light',   wind_ms: windMs, compass: dir };
+        if (windMs > 7   && windMs <= 10) return { score: 8,  direction: 'strong',  wind_ms: windMs, compass: dir };
+        if (windMs > 10  && windMs <= 13) return { score: 5,  direction: 'strong',  wind_ms: windMs, compass: dir };
+        if (windMs > 13)                  return { score: 0,  direction: 'extreme', wind_ms: windMs, compass: dir };
+        if (windMs < 1)                   return { score: isLowLight ? 0 : -8, direction: 'calm', wind_ms: windMs, compass: dir };
         return { score: 5, direction: 'light', wind_ms: windMs, compass: dir }; // 1–2 m/s
     }
 
@@ -460,8 +421,11 @@
 
     // ── Step 5: rain score (additive bonus) ─────────────────────────────────
 
-    // Sum of precip over the 48h BEFORE the window. Negative = none.
-    function rainScore(internalData, windowTsIdx, seasonName) {
+    // Sum of precip over the 48h BEFORE the window. Season-agnostic — user
+    // overrides mentally for cold inflow in winter (framework's "more
+    // complicated" case for heavy spring runoff vs. winter cold inflow is a
+    // calendar judgment, not an environmental measurement).
+    function rainScore(internalData, windowTsIdx) {
         const ts = internalData.timestamps;
         const r  = internalData.precip;
         const targetTs = ts[windowTsIdx];
@@ -470,41 +434,27 @@
         for (let i = 0; i < windowTsIdx; i++) {
             if (ts[i] >= targetTs - fortyEightHrMs) sum += (r[i] || 0);
         }
-        // Light rain (0.5–5mm): mild benefit.
-        // Heavy (>15mm) in winter: cold inflow hurts.
-        // Heavy in spring: creek arm magic.
-        if (sum < 0.3) return { score: 0,  direction: 'none',  mm: sum };
-        if (sum <= 5)  return { score: 6,  direction: 'light', mm: sum };
-        if (sum <= 15) return { score: 3,  direction: 'light', mm: sum };
-        if (seasonName === 'wintering' || seasonName === 'pre_spawn') {
-            return { score: -3, direction: 'heavy_winter', mm: sum };
-        }
-        return { score: 4, direction: 'heavy', mm: sum };
+        if (sum < 0.3) return { score: 0, direction: 'none',  mm: sum };
+        if (sum <= 5)  return { score: 6, direction: 'light', mm: sum };
+        if (sum <= 15) return { score: 4, direction: 'light', mm: sum };
+        return              { score: 3, direction: 'heavy', mm: sum };
     }
 
     // ── Step 1: mode classifier ─────────────────────────────────────────────
 
-    // Returns 'active' or 'ambush'. Built from season default + overrides:
-    //   - Pressure post-front → ambush (front trumps season)
-    //   - Temp >27°C in window → ambush (thermal ceiling)
-    //   - Temp <13°C in window → ambush (thermal floor)
-    //   - Summer + midday → ambush; summer + dawn/dusk → active
-    //   - Past anoxic start for this lake → ambush bias
-    function classifyMode({ season, tempCAvg, pressureDir, hourCenter, isAnoxic }) {
-        if (pressureDir === 'post_front' || pressureDir === 'fresh_front') return 'ambush';
+    // Returns 'active' or 'ambush'. Pure environmental triggers, no season.
+    //   - Post-front rising pressure → ambush (front trumps everything)
+    //   - Temp >27°C (80°F) → ambush (thermal ceiling, low-oxygen surface)
+    //   - Temp <13°C (55°F) → ambush (thermal floor)
+    //   - Past anoxic-zone start for this lake → ambush
+    //   - Otherwise → active (the framework's default mode when conditions
+    //     are within the active envelope and no front is passing)
+    function classifyMode({ tempCAvg, pressureDir, isAnoxic }) {
+        if (pressureDir === 'post_front_soft' || pressureDir === 'bluebird') return 'ambush';
         if (tempCAvg != null && tempCAvg > 27) return 'ambush';
         if (tempCAvg != null && tempCAvg < 13) return 'ambush';
         if (isAnoxic) return 'ambush';
-        if (season.name === 'summer') {
-            // Summer is conditional — dawn/dusk active, midday ambush.
-            if (hourCenter >= 9 && hourCenter <= 17) return 'ambush';
-            return 'active';
-        }
-        if (season.defaultMode === 'mixed') {
-            // Pre-spawn / spawn: lean active in warmer windows.
-            return (tempCAvg != null && tempCAvg >= 15) ? 'active' : 'ambush';
-        }
-        return season.defaultMode; // 'active' or 'ambush'
+        return 'active';
     }
 
     // ── Main scoring ────────────────────────────────────────────────────────
@@ -517,15 +467,14 @@
         const isoDate = toISODate(pdt);
         const hourCenter = pdt.getUTCHours();
 
-        const season = seasonBucket(isoDate);
-        const base = seasonalWindowQuality(isoDate, hourCenter);
+        const base = neutralWindowQuality(hourCenter);
         const tempCAvg = kToC(internalData.temp[idx]);             // window snapshot (display)
         const tempCDaily = dailyMeanTempC(internalData, isoDate);  // water-temp proxy (mode)
 
         const trend = tempTrendMultiplier(internalData, isoDate);
         const press = pressureMultiplier(internalData, idx);
         const wind  = windScore(internalData.windSpeed[idx], internalData.gusts[idx], internalData.windDir[idx], hourCenter);
-        const rain  = rainScore(internalData, idx, season.name);
+        const rain  = rainScore(internalData, idx);
         const fish  = fishabilityMultiplier(internalData.windSpeed[idx], internalData.gusts[idx]);
 
         // Anoxic check: is target date past this lake's stratification start?
@@ -533,7 +482,7 @@
         const isAnoxic = m.anoxicStart && m.anoxicEnd &&
             isoDate >= m.anoxicStart && isoDate <= m.anoxicEnd;
 
-        const mode = classifyMode({ season, tempCAvg: tempCDaily, pressureDir: press.direction, hourCenter, isAnoxic });
+        const mode = classifyMode({ tempCAvg: tempCDaily, pressureDir: press.direction, isAnoxic });
 
         // Step A: pure bass-rules score (no user-preference adjustment).
         // fish.mul vetos windows that are biologically prime but physically
@@ -552,15 +501,15 @@
         // Assemble reasons in priority order. We'll trim to top 3 in the verdict.
         const reasons = [];
 
-        // Fishability FIRST — if the window is physically rough for shore
-        // fishing, that's the headline regardless of how good the bite is.
-        // Without this on top, a "great bite, unfishable" window reads as
-        // misleading optimism in the UI.
         // Small helper so every push carries a polarity without repetition.
         const pushReason = (rule, direction, signal, why) => {
             reasons.push({ rule, direction, signal, why, polarity: polarityFor(rule, direction) });
         };
 
+        // Fishability FIRST — if the window is physically rough for shore
+        // fishing, that's the headline regardless of how good the bite is.
+        // Without this on top, a "great bite, unfishable" window reads as
+        // misleading optimism in the UI.
         if (fish.level !== 'ok') {
             const peak = fish.peak.toFixed(0);
             const label =
@@ -570,10 +519,11 @@
             pushReason('fishability', fish.level, label, RULE_WHYS.fishability[fish.level] || '');
         }
 
-        // Pressure — highest-leverage bass signal.
-        if (press.direction !== 'stable') {
-            pushReason('pressure', press.direction, pressureSignalText(press), RULE_WHYS.pressure[press.direction] || '');
-        }
+        // Pressure — highest-leverage bass signal. Always surfaced (including
+        // stable), so a quiet pressure reading doesn't look like missing data
+        // on the card. Framework treats stable as actionable info too:
+        // "fish where the calendar says."
+        pushReason('pressure', press.direction, pressureSignalText(press), RULE_WHYS.pressure[press.direction] || '');
         // Temp trend.
         if (trend.direction !== 'flat') {
             pushReason('temp_trend', trend.direction, tempSignalText(trend), RULE_WHYS.temp_trend[trend.direction] || '');
@@ -586,13 +536,6 @@
         // Rain — only if it moved the needle.
         if (rain.direction !== 'none' && Math.abs(rain.score) >= 3) {
             pushReason('rain', rain.direction, `${rain.mm.toFixed(1)}mm rain in last 48h`, RULE_WHYS.rain[rain.direction] || '');
-        }
-        // Season context — added if no other strong signal carries the day.
-        if (reasons.length < 2) {
-            const seasonKey = inferSeasonKey(season.name, hourCenter);
-            if (seasonKey) {
-                pushReason('season', seasonKey, humanSeasonName(season.name), RULE_WHYS.season[seasonKey] || '');
-            }
         }
         // Anoxic note (mainly Almaden in late June).
         if (isAnoxic && m.notes) {
@@ -641,6 +584,25 @@
         candidates.sort((a, b) => b.rawScore - a.rawScore);
         const best = candidates[0];
 
+        // Find a meaningfully-different second-best window — i.e. on a
+        // DIFFERENT weekend day if possible (so we surface "Sun 7-9 or Fri
+        // 7-9pm", not "Sun 7-9 or Sun 8-10"). If only one weekend day is
+        // left in the horizon, fall back to a window with ≥4h separation
+        // from the primary so the two recommendations are temporally
+        // distinct.
+        //
+        // Reasons stay tied to `best` only — the alternate is just a "if
+        // primary doesn't work for you" option, not its own scored verdict.
+        let alternate = null;
+        const bestDate = best.window.isoDate;
+        const bestHour = best.window.hourCenter;
+        for (let i = 1; i < candidates.length; i++) {
+            const c = candidates[i];
+            const differentDay   = c.window.isoDate !== bestDate;
+            const meaningfulGap  = Math.abs(c.window.hourCenter - bestHour) >= 4;
+            if (differentDay || meaningfulGap) { alternate = c; break; }
+        }
+
         // Trim reasons to top 3 (already in priority order).
         best.reasons = best.reasons.slice(0, 3);
 
@@ -650,6 +612,8 @@
             rawScore: best.rawScore,
             mode: best.mode,
             window: best.window,
+            alternateWindow: alternate ? alternate.window : null,
+            alternateScore:  alternate ? alternate.score  : null,
             reasons: best.reasons,
             weekendDates: weekend,
             _debug: best._debug,
@@ -672,50 +636,31 @@
     // ── Signal text helpers ─────────────────────────────────────────────────
 
     function pressureSignalText(press) {
-        const d = press.delta12h.toFixed(1);
-        const sign = press.delta12h >= 0 ? '+' : '';
-        if (press.direction === 'pre_front')   return `Pressure falling (${sign}${d} mmHg/12h)`;
-        if (press.direction === 'post_front')  return `Pressure rising (${sign}${d} mmHg/12h) — post-front`;
-        if (press.direction === 'fresh_front') return `Pressure spiking (${sign}${d} mmHg/12h) — fresh front`;
-        if (press.direction === 'slow_rise')   return `Pressure recovering (${sign}${d} mmHg/12h)`;
+        const d = Math.abs(press.delta12h).toFixed(1);
+        if (press.direction === 'storm_front')     return `Pressure ↓ ${d} mmHg/12h — major front`;
+        if (press.direction === 'pre_front')       return `Pressure ↓ ${d} mmHg/12h`;
+        if (press.direction === 'soft_fall')       return `Pressure ↓ ${d} mmHg/12h`;
+        if (press.direction === 'post_front_soft') return `Pressure ↑ ${d} mmHg/12h — post-front`;
+        if (press.direction === 'bluebird')        return `Pressure ↑ ${d} mmHg/12h — bluebird high`;
         return `Pressure stable`;
     }
 
     function tempSignalText(trend) {
         const d = trend.deltaC.toFixed(1);
         const sign = trend.deltaC >= 0 ? '+' : '';
+        if (trend.direction === 'sudden_drop') {
+            return `24h temp drop (${sign}${d}°C est. water)`;
+        }
         const dir = trend.deltaC > 0 ? 'Rising' : 'Falling';
         return `${dir} 3-day temp trend (${sign}${d}°C est. water)`;
     }
 
     function windDescriptor(wind) {
-        if (wind.direction === 'ideal') return `${wind.compass || ''} wind`.trim();
-        if (wind.direction === 'calm')  return 'Glass calm';
-        if (wind.direction === 'heavy') return `Strong ${wind.compass || ''} wind`.trim();
+        if (wind.direction === 'ideal')   return `${wind.compass || ''} wind`.trim();
+        if (wind.direction === 'calm')    return 'Glass calm';
+        if (wind.direction === 'strong')  return `Strong ${wind.compass || ''} wind`.trim();
+        if (wind.direction === 'extreme') return `Extreme ${wind.compass || ''} wind`.trim();
         return `Light ${wind.compass || ''} wind`.trim();
-    }
-
-    function inferSeasonKey(seasonName, hourCenter) {
-        if (seasonName === 'post_spawn' && hourCenter <= 9) return 'post_spawn_morning';
-        if (seasonName === 'post_spawn' && hourCenter >= 17) return 'post_spawn_evening';
-        if (seasonName === 'summer' && hourCenter <= 7) return 'summer_dawn';
-        if (seasonName === 'summer' && hourCenter >= 18) return 'summer_dusk';
-        if (seasonName === 'fall') return 'fall_feed';
-        if (seasonName === 'spawn') return 'spawn';
-        if (seasonName === 'pre_spawn') return 'pre_spawn';
-        if (seasonName === 'wintering') return 'wintering';
-        return null;
-    }
-
-    function humanSeasonName(s) {
-        return ({
-            wintering: 'Wintering',
-            pre_spawn: 'Pre-spawn',
-            spawn: 'Spawn',
-            post_spawn: 'Post-spawn',
-            summer: 'Summer thermal cap',
-            fall: 'Fall feed'
-        })[s] || s;
     }
 
     // ── Expose ──────────────────────────────────────────────────────────────
@@ -724,10 +669,9 @@
         scoreLocation,
         scoreAllLocations,
         getWeekend,
-        seasonBucket,
         // Exposed for tests + tuning:
         _internal: {
-            seasonalWindowQuality,
+            neutralWindowQuality,
             tempTrendMultiplier,
             pressureMultiplier,
             windScore,
