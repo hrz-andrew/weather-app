@@ -12,7 +12,7 @@
     <script src="lake-metadata.js"></script>
     <!-- Bass-fishing scoring engine. Reads the internal weather shape + LAKE_META,
          returns ranked verdicts for the Insights section. Pure logic — no DOM. -->
-    <script src="insights.js"></script>
+    <script src="insights.js?v=dispwin-1"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -281,6 +281,325 @@
         .weekly-outlook.midweek_valley { border-left-color: #6aa8c8; }
         .weekly-outlook.steady         { border-left-color: #4a7a9a; }
         .weekly-outlook.mixed          { border-left-color: #8a8aa8; }
+
+        /* ──────────────────────────────────────────────────────────────
+           Track A — phase arc + week pattern tag (PRD §2).
+           Sit inside .weekly-outlook, below existing headline / impact.
+           Phase chips use the 5-tier polarity (bad / warn / neutral /
+           good-mild / good) — judgment colors, distinct from data colors
+           used in the temp/wind charts.
+           ────────────────────────────────────────────────────────────── */
+        .wo-week-tag {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(122, 168, 200, 0.15);
+            font-size: 12px;
+            flex-wrap: wrap;
+        }
+        .wo-week-tag .wt-label {
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #7aa8c8;
+            opacity: 0.75;
+        }
+        .wo-week-tag .wt-value {
+            font-weight: 600;
+            color: #d6e6f4;
+        }
+        .wo-week-tag .wt-sep { color: #4a7a9a; }
+        .wo-week-tag .wt-conf {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #7aa8c8;
+        }
+        .wo-week-tag .wt-conf::before {
+            content: '';
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #6a7a8a;
+        }
+        .wo-week-tag .wt-conf.high::before    { background: #5aa06a; }
+        .wo-week-tag .wt-conf.medium::before  { background: #c8a04a; }
+        .wo-week-tag .wt-conf.low::before     { background: #b85a5a; }
+
+        .wo-phase-arc {
+            display: flex;
+            gap: 6px;
+            margin-top: 10px;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+        .wo-phase-cell {
+            flex: 1 1 0;
+            min-width: 64px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+        .wo-phase-cell .wpc-day {
+            font-size: 10px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #7a96b0;
+        }
+        .wo-phase-chip {
+            position: relative;
+            width: 100%;
+            padding: 6px 4px 5px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            color: #f0f4f8;
+            background: rgba(106, 122, 138, 0.25);
+            border-color: rgba(106, 122, 138, 0.45);
+        }
+        /* Phase semantic colors — fishing-impact polarity, not data values. */
+        .wo-phase-chip.tone-good      { background: rgba(74, 138, 90, 0.30);  border-color: rgba(74, 138, 90, 0.55); }
+        .wo-phase-chip.tone-good-mild { background: rgba(106, 154, 106, 0.22); border-color: rgba(106, 154, 106, 0.45); }
+        .wo-phase-chip.tone-warn      { background: rgba(200, 160, 74, 0.22); border-color: rgba(200, 160, 74, 0.45); }
+        .wo-phase-chip.tone-bad       { background: rgba(184, 90, 90, 0.25);  border-color: rgba(184, 90, 90, 0.50); }
+        .wo-phase-chip.tone-neutral   { background: rgba(106, 122, 138, 0.22); border-color: rgba(106, 122, 138, 0.40); }
+        /* Confidence dot — small circle bottom-right of the chip. */
+        .wo-phase-chip .wpc-dot {
+            position: absolute;
+            right: 4px; bottom: 4px;
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #6a7a8a;
+            opacity: 0.9;
+        }
+        .wo-phase-chip .wpc-dot.high    { background: #5aa06a; }
+        .wo-phase-chip .wpc-dot.medium  { background: #c8a04a; }
+        .wo-phase-chip .wpc-dot.low     { background: #8a8a8a; }
+
+        /* ── Daily Insights pane (per-card Data ↔ Insights toggle) ───────────
+           Phase chip + rationale on top, then 3 stacked category sections
+           (Pressure / Temperature / Wind & gust). Each section: label + now
+           value on one row, then a 72h sparkline, then 3 delta tiles. Tones
+           reuse the wo-phase-chip palette to keep visual language unified
+           across the three insight lenses. */
+        .di-pane { padding: 18px 22px 20px; }
+
+        /* Top row: chip + rationale block. Rationale wraps next to the chip. */
+        .di-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+        .di-rationale-block {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #b8cad8;
+            flex: 1;
+            padding-top: 2px;
+        }
+        .di-day-label {
+            font-size: 10px;
+            color: #5a7a92;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+            font-weight: 600;
+        }
+
+        .di-chip {
+            position: relative;
+            padding: 10px 16px 9px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            color: #f0f4f8;
+            background: rgba(106, 122, 138, 0.25);
+            border-color: rgba(106, 122, 138, 0.45);
+            min-width: 88px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .di-chip.tone-good      { background: rgba(74, 138, 90, 0.30);  border-color: rgba(74, 138, 90, 0.55); }
+        .di-chip.tone-good-mild { background: rgba(106, 154, 106, 0.22); border-color: rgba(106, 154, 106, 0.45); }
+        .di-chip.tone-warn      { background: rgba(200, 160, 74, 0.22); border-color: rgba(200, 160, 74, 0.45); }
+        .di-chip.tone-bad       { background: rgba(184, 90, 90, 0.25);  border-color: rgba(184, 90, 90, 0.50); }
+        .di-chip.tone-neutral   { background: rgba(106, 122, 138, 0.22); border-color: rgba(106, 122, 138, 0.40); }
+        .di-chip .di-dot {
+            position: absolute;
+            right: 5px; bottom: 5px;
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #6a7a8a;
+            opacity: 0.9;
+        }
+        .di-chip .di-dot.high    { background: #5aa06a; }
+        .di-chip .di-dot.medium  { background: #c8a04a; }
+        .di-chip .di-dot.low     { background: #8a8a8a; }
+
+        /* Per-category section — one block per Pressure/Temp/Wind. */
+        .di-section {
+            padding: 12px 0 14px;
+            border-top: 1px solid rgba(40, 60, 88, 0.5);
+        }
+        .di-section:first-of-type { border-top: none; padding-top: 4px; }
+        .di-section-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .di-section-label {
+            font-size: 11px;
+            color: #6a8aa8;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .di-section-val {
+            font-size: 20px;
+            font-weight: 600;
+            color: #e0eaf4;
+            line-height: 1;
+        }
+        .di-section-unit {
+            font-size: 11px;
+            color: #6a8aa8;
+            margin-left: 3px;
+            font-weight: 400;
+        }
+        .di-section-sub {
+            font-size: 12px;
+            color: #8aa0b8;
+            margin-left: 6px;
+            font-weight: 400;
+        }
+        .di-section-sub-unit {
+            font-size: 10px;
+            color: #6a8aa8;
+        }
+
+        .di-spark {
+            width: 100%;
+            height: 110px;
+            display: block;
+            margin-bottom: 8px;
+        }
+        .di-spark-empty {
+            font-size: 11px;
+            color: #6a7a8a;
+            font-style: italic;
+            padding: 14px 0;
+            text-align: center;
+        }
+        .di-deltas {
+            display: grid;
+            /* grid-template-columns is set INLINE per-section so each chip
+               aligns to the DAY SEGMENT (sunrise→sunset band) it labels.
+               Structure: [lead] [Day72H chip] [Night1] [Day48H chip]
+               [Night2] [Day24H chip] [trail = Night3 + today-to-dusk].
+               Default here is an even three-up fallback for the rare case
+               where sunByDate is missing. */
+            grid-template-columns: 0% 1fr 0% 1fr 0% 1fr 0%;
+            /* No gap: column percentages already sum to 100% of the chart
+               width and adding a gap would visually nudge tiles off their
+               chart-segment alignment. Tile breathing room is handled via
+               border + margin below. */
+            gap: 0;
+        }
+        .di-delta-spacer {
+            /* Empty grid cells for the dawn/dusk framing — match the
+               chart's leading/trailing extension so tiles align to their
+               actual 24h chart segments. */
+        }
+        .di-delta {
+            /* Chip is now a single-line caption: "72h ↑1.5". No background,
+               no border, no padding — the chip's horizontal POSITION on the
+               day band is the only visual link to the chart now (the tile
+               chrome was redundant with that). Saves ~25px vertical per
+               section, which the chart claims back via taller .di-spark. */
+            display: flex;
+            justify-content: center;
+            align-items: baseline;
+            gap: 5px;
+            /* Clip content cleanly at column boundaries — same partial-data
+               edge case as before (e.g. 24h-only history collapses 48H+72H
+               cells to 0% width). Without this, the chip's text would
+               overflow into adjacent grid cells. */
+            overflow: hidden;
+            box-sizing: border-box;
+            min-width: 0;
+            white-space: nowrap;
+            font-size: 13px;
+            color: #cfdce8;
+        }
+        .di-delta-label {
+            font-size: 11px;
+            color: #6a8aa8;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            /* No margin — label sits inline with the value */
+        }
+        .di-delta-val {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e0eaf4;
+        }
+        /* Bass-fishing polarity classes — generic so they work anywhere
+           (delta tiles, headline value+arrow, future chips). Same 5-tier
+           palette as the Weekend Insights dots so the reader learns one
+           color language across the whole app:
+             green   = good for bass    (front feed, warming, breeze settling)
+             yellow  = warning           (post-front, cooling, roughening)
+             red     = strong negative   (bluebird, cold crash, gale, glass)
+           JS deltaPolarity() decides which tier applies per category. */
+        .pol-good      { color: #4ade80; }  /* strong positive */
+        .pol-good-mild { color: #86efac; }  /* mild positive   */
+        .pol-neutral   { color: #7a96b0; }  /* noise band       */
+        .pol-warn      { color: #fbbf24; }  /* mild headwind   */
+        .pol-bad       { color: #f87171; }  /* strong negative */
+        .di-delta-val.dim { color: #5a6a7a; }  /* missing data — tile-scoped */
+
+        /* Arrow color is intentionally DECOUPLED from polarity. Direction
+           (↑/↓) and tier (good/warn/bad) are orthogonal axes, and color
+           is the wrong channel to encode both — once a single hue means
+           "rising + warning" you can no longer display drift honestly,
+           because a soft rise inside the noise band still inherits the
+           warning hue. So the arrow always renders in muted slate; only
+           the magnitude number takes the polarity tier color. */
+        .di-delta-arrow,
+        .di-headline-arrow {
+            color: #8a9fb5;
+            font-weight: 600;
+            margin-right: 2px;
+        }
+        /* 48H / 72H tiles are SUPPORTING CONTEXT, not verdicts. Only the
+           24H tile carries the primary scoring weight (Signal 1). To
+           keep all three from reading as equal verdicts, .ctx tiles get
+           a muted variant of the same hue family — same colors, lower
+           saturation via opacity 0.55. The hue family stays consistent
+           so the eye links 24H + 48H + 72H as one signal told three ways. */
+        .di-delta.ctx .pol-good,
+        .di-delta.ctx .pol-good-mild,
+        .di-delta.ctx .pol-neutral,
+        .di-delta.ctx .pol-warn,
+        .di-delta.ctx .pol-bad,
+        .di-delta.ctx .di-delta-arrow {
+            opacity: 0.55;
+        }
+        .di-delta.ctx .di-delta-label {
+            opacity: 0.75;
+        }
 
         .insights-head {
             display: flex;
@@ -662,6 +981,37 @@
         }
 
         .remove-btn:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+
+        /* Per-card view switcher (Data ↔ Insights). Mirrors the global model
+           switcher so the visual language is consistent: a pair of pill
+           buttons, the active one filled in. Lives in the card header between
+           the title block and the kebab menu. */
+        .view-switcher {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+            margin-right: 8px;
+        }
+        .view-btn {
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .view-btn.active {
+            background: #0f3460;
+            border-color: #1a5a9a;
+            color: #7dd3fc;
+            font-weight: 700;
+        }
+        .view-btn:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
 
         /* Per-card overflow menu (vertical dots → dropdown with actions).
            Debug dump + remove location used to sit exposed in the header;
@@ -1536,8 +1886,10 @@ let weatherFetchedAt = {};   // locId → Date.now() timestamp of last successfu
 // would show "no data" for the extra tabs until they expired naturally.
 // v6 — bumped when we started requesting past_days=1 so today's PT-morning
 // hours aren't missing in late-evening sessions.
-const CACHE_DATA_KEY    = 'wx-data-v6';
-const CACHE_FETCHED_KEY = 'wx-fetchedAt-v6';
+// v7 — bumped when past_days grew 1 → 3 to feed the daily Insights toggle a
+// full 72h backward window for phase classification.
+const CACHE_DATA_KEY    = 'wx-data-v7';
+const CACHE_FETCHED_KEY = 'wx-fetchedAt-v7';
 try {
     weatherData      = JSON.parse(localStorage.getItem(CACHE_DATA_KEY)    || '{}');
     weatherFetchedAt = JSON.parse(localStorage.getItem(CACHE_FETCHED_KEY) || '{}');
@@ -1547,6 +1899,7 @@ try {
     localStorage.removeItem('wx-data-v3');     localStorage.removeItem('wx-fetchedAt-v3');
     localStorage.removeItem('wx-data-v4');     localStorage.removeItem('wx-fetchedAt-v4');
     localStorage.removeItem('wx-data-v5');     localStorage.removeItem('wx-fetchedAt-v5');
+    localStorage.removeItem('wx-data-v6');     localStorage.removeItem('wx-fetchedAt-v6');
 } catch (e) {
     console.warn('Could not restore cache from localStorage:', e);
     weatherData = {}; weatherFetchedAt = {};
@@ -1562,6 +1915,10 @@ let activeModel  = localStorage.getItem('wx-model-v2') || 'ecmwf-local'; // v2 r
 // Which chart is shown inside every card — 'temp' or 'wind'. Switching on one
 // card applies to all cards (cross-card tab sync) and is persisted.
 let activeChartTab = localStorage.getItem('wx-chart-tab') || 'temp';
+// Per-card view: 'data' (default) or 'insights' (phase chip + 72h trajectory).
+// Per-card on purpose — Andrew may want to inspect Insights on one lake while
+// reading Data on another. Not persisted; session-only state.
+let cardView = {};   // locId → 'data' | 'insights'
 // NOTE: For the Windy Point Forecast free API, `temp-surface` is interpreted
 // differently per model:
 //   • GFS   → 2m air temperature (what a thermometer reads) ✓
@@ -1608,6 +1965,26 @@ function ptDateStrOffset(days) {
     const [y, m, d] = today.split('-').map(Number);
     const target = new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
     return ptDateStr(target.getTime());
+}
+
+// Returns UTC ms for a given PT calendar date + hour (24h).
+// DST-safe: probes the PT offset on THAT specific date rather than assuming
+// a fixed UTC-7 / UTC-8 shift. We were previously hardcoding 19:00 UTC = noon
+// PDT, which silently drifts by an hour in winter (PST). With this helper,
+// a 14:00 PT anchor stays at "2 PM in Bay Area local time" all year.
+function ptHourToUtcMs(yyyyMmDd, hourPT) {
+    const [y, m, d] = yyyyMmDd.split('-').map(Number);
+    // Probe: noon UTC on that calendar date is unambiguously the same UTC
+    // day, regardless of DST, so the PT timezone view of it is well-defined.
+    const probe = Date.UTC(y, m - 1, d, 12, 0, 0);
+    const probePtHour = parseInt(
+        new Intl.DateTimeFormat('en-US', {
+            timeZone: PT, hour: 'numeric', hour12: false
+        }).formatToParts(new Date(probe))
+          .find(p => p.type === 'hour').value,
+        10
+    );
+    return probe + (hourPT - probePtHour) * 3600 * 1000;
 }
 
 // Slice the full processed data to only timestamps matching the active day
@@ -1796,11 +2173,12 @@ async function fetchWeather(loc) {
         wind_speed_unit: 'ms',
         timezone:  'UTC',          // we'll convert to PT on display
         forecast_days: FORECAST_DAYS,
-        // Pull in the previous UTC day so that, on late-evening PT wall clocks
-        // (when UTC has already rolled over), today's PT morning hours are
-        // still present in the hourly window. filterByPeriod() then slices by
-        // PT calendar date, so these extra hours only surface when relevant.
-        past_days: 1,
+        // Pull in 3 previous UTC days so the daily Insights chip has a full
+        // 72h backward window for phase classification (pressure deltas
+        // 24h/48h/72h). filterByPeriod() still slices by PT calendar date for
+        // the forward-facing views, so these extra hours only surface in the
+        // Insights pane.
+        past_days: 3,
         models:    model
     });
     // Retry once on 429 (rate limit) after a short back-off
@@ -2384,6 +2762,10 @@ function createCard(loc) {
                 <h3>${loc.name}<span class="cond-time card-time" data-loc-id="${loc.id}"></span></h3>
                 <div class="loc-label">${loc.label} &nbsp;·&nbsp; ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}</div>
             </div>
+            <div class="view-switcher" data-loc-id="${loc.id}">
+                <button class="view-btn active" id="view-data-${loc.id}" onclick="setCardView(${loc.id}, 'data', this)" title="Forecast data, peek tiles, charts">Data</button>
+                <button class="view-btn" id="view-insights-${loc.id}" onclick="setCardView(${loc.id}, 'insights', this)" title="Bass-relevant phase + 72h trajectory">Insights</button>
+            </div>
             <div class="card-menu" data-loc-id="${loc.id}">
                 <button class="card-menu-btn" onclick="toggleCardMenu(${loc.id}, event)" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
                 <div class="card-menu-dropdown" id="card-menu-${loc.id}" role="menu">
@@ -2401,6 +2783,15 @@ function createCard(loc) {
 function populateCard(loc, rawD) {
     const body = document.getElementById(`body-${loc.id}`);
     if (!body) return;
+
+    // Insights view is per-card. It reads the FULL unfiltered series (rawD)
+    // because the phase classifier needs ~72h of backward context — not the
+    // PT-day slice that the Data view shows. We branch early so the Data
+    // rendering path is untouched.
+    if ((cardView[loc.id] || 'data') === 'insights') {
+        body.innerHTML = renderInsightsView(loc, rawD);
+        return;
+    }
 
     const d = filterByPeriod(rawD, activePeriod);
     if (!d) {
@@ -3372,6 +3763,761 @@ function switchTab(locId, type, btn) {
     });
 }
 
+// ── Daily Insights view renderer ────────────────────────────────────────────
+// Builds the HTML string for the Insights pane. Reads from INSIGHTS.dailyInsights()
+// in insights.js — engine returns phase verdict + three trajectory categories
+// (pressure / temp / wind). This function turns that into DOM. Kept here (not
+// in insights.js) so the prose, SVG sparkline, and tile layout stay in the
+// rendering layer.
+function renderInsightsView(loc, rawD) {
+    if (typeof INSIGHTS === 'undefined' || !INSIGHTS.dailyInsights) {
+        return `<div class="no-data-msg">Insights engine not loaded yet.</div>`;
+    }
+
+    // ── Day anchor ─────────────────────────────────────────────────────────
+    // Insights are anchored to the currently selected day tab. The engine's
+    // `nowMs` param shifts every calc (phase, deltas, sparkline window) so the
+    // same code path serves both "what's happening now" (Today) and "what's
+    // forecasted for Mon" (future days).
+    //
+    // Today  → wall-clock NOW (sparkline ends at the current hour — matches
+    //           the "Now" badge in the Data view).
+    // Other  → 2 PM PT of the selected day (matches the Data view's default
+    //           "2 PM" badge for non-today days, so the headline value in
+    //           Insights == the headline value in Data for the same day).
+    //
+    // The headline is THE single number a user reads first; aligning it
+    // across Data and Insights kills the confusion source where Mon read
+    // "26°C" in Data and "23°C" in Insights for the same day.
+    const todayPTStr = ptDateStr(Date.now());
+    const isToday = (activePeriod === todayPTStr);
+    const anchorMs = (!activePeriod || isToday)
+        ? Date.now()
+        : ptHourToUtcMs(activePeriod, 14);   // 2 PM PT
+
+    const di = INSIGHTS.dailyInsights(rawD, anchorMs);
+    if (!di) {
+        return `<div class="no-data-msg">Not enough data for Insights.<br>Switch back to <b>Data</b> for the forecast view.</div>`;
+    }
+
+    // Day label for the top of the pane — "Today, Sat 16" or "Mon, May 18".
+    // Stays small + muted; the day tabs are the primary day selector, this is
+    // just a confirmation that the insights reflect that selection.
+    const dayLabel = (function() {
+        const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const [y, m, d] = (di.todayDate || activePeriod || todayPTStr).split('-').map(Number);
+        const refUtc = Date.UTC(y, m - 1, d, 12, 0, 0);
+        const wd = ptWeekday(refUtc);
+        return isToday
+            ? `Today · ${names[wd]} ${d}`
+            : `${names[wd]}, ${months[m-1]} ${d}`;
+    })();
+
+    const tone  = PHASE_TONE_MAP[di.phase]  || 'neutral';
+    const label = PHASE_LABEL_MAP[di.phase] || di.phase;
+    const conf  = di.confidence || 'low';
+
+    // Per-category trend bands, SCALED BY LOOKBACK WINDOW.
+    //
+    // Bass don't respond to gross deltas — they respond to rate-of-change
+    // relative to their ~24h bladder-equalization window (Study §1). A
+    // 6 mmHg fall over 24h is a system passing through; the same 6 mmHg
+    // spread over 72h is slow drift the fish adapt to in real time. So
+    // each band scales linearly with window length: same RATE = same tier
+    // at every timescale.
+    //
+    // Tier definitions per category:
+    //   PRESSURE   drift = noise floor, action = clear movement,
+    //              severe = storm-level. Asymmetric at 24H only
+    //              (soft falls matter more than soft rises because pre-
+    //              frontal feed signals are inherently more valuable).
+    //   TEMP/WIND  symmetric drift/wide bands, scaled linearly with window.
+    //
+    // 24H bands come from the scoring rules directly (canonical thresholds).
+    // 48H/72H are 2× and 3× of those — same rate, scaled to the lookback.
+    const PRESSURE_BANDS = {
+        24: { drift: 1.5, fallAction: 3, riseAction: 4, severe: 7  },
+        48: { drift: 3.0, fallAction: 6, riseAction: 6, severe: 14 },
+        72: { drift: 4.5, fallAction: 9, riseAction: 9, severe: 21 }
+    };
+    const TEMP_BANDS = {
+        24: { drift: 1.0, wide: 3.0 },
+        48: { drift: 2.0, wide: 6.0 },
+        72: { drift: 3.0, wide: 9.0 }
+    };
+    const WIND_BANDS = {
+        24: { drift: 0.5, wide: 1.5 },
+        48: { drift: 1.0, wide: 3.0 },
+        72: { drift: 1.5, wide: 4.5 }
+    };
+
+    // Lookup helper — falls back to 24H bands when window is unknown so
+    // existing call sites that haven't been updated yet still get the
+    // canonical thresholds.
+    function bandsFor(category, windowH) {
+        const w = windowH || 24;
+        if (category === 'pressure') return PRESSURE_BANDS[w] || PRESSURE_BANDS[24];
+        if (category === 'temp')     return TEMP_BANDS[w]     || TEMP_BANDS[24];
+        return WIND_BANDS[w] || WIND_BANDS[24];
+    }
+
+    // ── Bass-fishing polarity ──────────────────────────────────────────────
+    // Colors express FISHING relevance, not raw weather direction. Same
+    // 5-tier spectrum the Weekend Insights and the phase chip already use:
+    //   good       — strong positive (front building, warming, settling wind)
+    //   good-mild  — right direction, mild magnitude
+    //   neutral    — true noise band, no signal either way
+    //   warn       — mild headwind (post-front, cooling, roughening)
+    //   bad        — strong negative (bluebird, cold crash, gale OR dead calm)
+    //
+    // Category-specific reasoning:
+    //   PRESSURE   asymmetric — falling = pre-front feed (good), rising =
+    //              clearing/bluebird (warn/bad). The single strongest signal.
+    //   TEMP       biology-driven — warming activates bass (good); cooling
+    //              pushes them deeper (warn); rapid drops shut them down (bad).
+    //   WIND       INVERTED from temp — falling wind = settling, less chop,
+    //              fish near surface (good). Rising wind heads toward rough
+    //              water (warn/bad). PLUS an absolute-state override: dead
+    //              calm right now (< 1 m/s, matching the engine's `calm`
+    //              threshold) kills the bite regardless of trend — glass
+    //              water has no ripple, no oxygenation, no cover.
+    //
+    // absNow is optional. Pressure and temp ignore it; wind uses it for the
+    // calm override. Passing it everywhere keeps the call site uniform.
+    const CALM_WIND_MS = 1.0;  // matches insights.js wind.direction = 'calm'
+
+    function deltaPolarity(category, v, absNow, windowH) {
+        if (v == null) return 'neutral';
+        const b = bandsFor(category, windowH);
+
+        if (category === 'pressure') {
+            // Window-scaled bands per scoring rules. The asymmetry between
+            // fallAction (3) and riseAction (4) lives in the 24H row only —
+            // a soft pre-frontal fall at the bladder-equalization timescale
+            // carries real signal, while a soft post-front rise of the same
+            // magnitude is usually still in the drift noise.
+            if (Math.abs(v) <= b.drift)  return 'neutral';
+            if (v <= -b.severe)          return 'bad';        // storm-level fall
+            if (v >=  b.severe)          return 'bad';        // sharp rebound
+            if (v <= -b.fallAction)      return 'good';       // pre-front feed window
+            if (v <   0)                 return 'good-mild';  // soft fall, partial signal
+            if (v >=  b.riseAction)      return 'warn';       // post-front Day 1
+            return 'neutral';                                  // soft rise — still drift
+        }
+
+        if (category === 'temp') {
+            const inNoise = (v > -b.drift && v < b.drift);
+            if (inNoise)        return 'neutral';
+            if (v >=  b.wide)   return 'good';
+            if (v >   0)        return 'good-mild';
+            if (v <= -b.wide)   return 'bad';
+            return 'warn';
+        }
+
+        // Wind — trend INVERTED, plus calm-state override.
+        let pol;
+        const inNoise = (v > -b.drift && v < b.drift);
+        if (inNoise)            pol = 'neutral';
+        else if (v <= -b.wide)  pol = 'good';        // strong settling
+        else if (v <   0)       pol = 'good-mild';   // soft settling
+        else if (v >=  b.wide)  pol = 'bad';         // gale building
+        else                    pol = 'warn';        // light rise toward rough
+
+        // Absolute override — dead calm RIGHT NOW kills the bite regardless
+        // of trend. "Falling further into glass" is the worst case.
+        if (absNow != null && absNow < CALM_WIND_MS) {
+            if (pol === 'good' || pol === 'good-mild') pol = 'warn';
+            else if (pol === 'neutral')                pol = 'bad';
+        }
+        return pol;
+    }
+
+    // Polarity → hex (matches insight-reason dot palette so the eye reads the
+    // same "green = good, yellow = warn, red = bad" language everywhere).
+    const POL_COLOR = {
+        'good':      '#4ade80',
+        'good-mild': '#86efac',
+        'neutral':   '#7a96b0',  // muted slate — same as old "steady"
+        'warn':      '#fbbf24',
+        'bad':       '#f87171'
+    };
+
+    function strokeFor(category, overall, absNow) {
+        return POL_COLOR[deltaPolarity(category, overall, absNow)] || POL_COLOR.neutral;
+    }
+
+    // ── Per-point color-by-value (matches the Data view's daily charts) ──
+    //
+    // The Insights sparkline now stitches three days together into one strip.
+    // We want the eye to read the *absolute* state along it: cold blues at
+    // night, warm yellows mid-afternoon, etc. That's the same language the
+    // Data view's day-by-day temp/wind/pressure charts already use, so we
+    // reuse those exact color functions here.
+    //
+    // tempColor / windColor (outer scope) work on the Data view's "identity"
+    // scale: color = where you are on the temperature/wind axis. We reuse
+    // those directly in Insights because they already say what we want
+    // ("this is a cold morning / this is a breezy afternoon").
+    //
+    // Pressure is special. Unlike temp/wind, the *absolute* mmHg reading has
+    // a direct fishing meaning: low pressure (pre-frontal) triggers bass
+    // feeding, bluebird highs shut the bite down. So while the Data view
+    // uses pressureColor() in meteorological convention (low=red=storm), the
+    // Insights sparkline FLIPS the semantics: low=green=feed, high=red=bite-off.
+    //
+    // 5-tier step palette mirrors the polarity colors used by the delta tiles
+    // and the Weekend "Best window" cards — one color language across the
+    // whole card. Step bins (not interpolated) because bass behavior is
+    // zone-triggered, not smooth: the bite "turns on" when pressure drops
+    // through ~1010 hPa, doesn't fade continuously.
+    //
+    // Zone breakpoints (approx):
+    //   < 752 mmHg (< 29.61 inHg)  good       — strong low, prime feed
+    //   752–757   (29.61–29.80)    good-mild  — soft low / pre-front
+    //   757–764   (29.80–30.06)    neutral    — typical baseline
+    //   764–768   (30.06–30.22)    warn       — high building, bite slowing
+    //   > 768     (> 30.22)        bad        — bluebird dome, lethargic bass
+    function pressureColorBass(mmhg) {
+        if (mmhg == null || isNaN(mmhg)) return '#94a3b8';
+        if (mmhg < 752) return '#4ade80';   // good      — strong low
+        if (mmhg < 757) return '#86efac';   // good-mild — soft low
+        if (mmhg < 764) return '#7a96b0';   // neutral   — baseline
+        if (mmhg < 768) return '#fbbf24';   // warn      — high building
+        return '#f87171';                    // bad       — bluebird
+    }
+
+    // Night-range computer for SVG sparklines.
+    //
+    // The Data view shades night hours with a subtle indigo wash + dashed
+    // sunrise/sunset bars (sunBarsPlugin) — we want the same visual cue on
+    // the Insights sparklines so the eye instantly maps "warm bump at 2 PM,
+    // cools through night, warms again next day" instead of seeing temp
+    // curves floating in undifferentiated time.
+    //
+    // sunByDate is keyed by PT date string ('YYYY-MM-DD') with
+    // { sunrise, sunset } timestamps. A 72h window spans 3 PT dates → up
+    // to 3 night ranges to render. We walk one day before the window
+    // start through one day after, so partial nights on the edges
+    // (window starts at 3 AM, half a night already visible) get clipped
+    // correctly into the visible range.
+    //
+    // Why we don't just use `darkHoursForRange()` from the cards: that
+    // helper returns an array of *hour indices* keyed off a specific
+    // timestamp array. The sparkline's x-axis is continuous TIME, not
+    // discrete hour bins — rendering by index would mis-align with a
+    // time-based gradient. So we return raw {start, end} ms-pairs and
+    // let sparkSvg() project them onto its own x-scale.
+    function nightRangesFor(startMs, endMs, sunByDate) {
+        if (!sunByDate || startMs == null || endMs == null) return [];
+        const ranges = [];
+        const dayMs = 24 * 3600 * 1000;
+        // Walk from one day before start to one day after end so partial
+        // edge-nights get included (clipped to window below).
+        let cursor = startMs - dayMs;
+        const stop = endMs + dayMs;
+        const seen = new Set();
+        while (cursor <= stop) {
+            const dStr = ptDateStr(cursor);
+            if (!seen.has(dStr)) {
+                seen.add(dStr);
+                const sun = sunByDate[dStr];
+                if (sun && sun.sunset) {
+                    // This day's "night" = THIS sunset → NEXT day's sunrise.
+                    const nextStr = ptDateStr(cursor + dayMs);
+                    const nextSun = sunByDate[nextStr];
+                    const nightStart = sun.sunset;
+                    const nightEnd = (nextSun && nextSun.sunrise)
+                        ? nextSun.sunrise
+                        : nightStart + 12 * 3600 * 1000;   // fallback ≈ 12h
+                    // Clip into the visible window.
+                    const s = Math.max(nightStart, startMs);
+                    const e = Math.min(nightEnd,   endMs);
+                    if (s < e) ranges.push({ start: s, end: e });
+                }
+            }
+            cursor += dayMs;
+        }
+        return ranges;
+    }
+
+    // Sunrise/sunset crossings INSIDE the visible window — for the dashed
+    // vertical bars. Different from nightRangesFor(): a night range
+    // captures the *interval*, this captures the *boundary lines*. Some
+    // crossings fall outside the window (e.g. yesterday's sunset is
+    // older than 72h ago) and we want only the visible ones.
+    function sunCrossingsIn(startMs, endMs, sunByDate) {
+        if (!sunByDate || startMs == null || endMs == null) return [];
+        const out = [];
+        const dayMs = 24 * 3600 * 1000;
+        const seen = new Set();
+        for (let c = startMs - dayMs; c <= endMs + dayMs; c += dayMs) {
+            const dStr = ptDateStr(c);
+            if (seen.has(dStr)) continue;
+            seen.add(dStr);
+            const sun = sunByDate[dStr];
+            if (!sun) continue;
+            if (sun.sunrise != null && sun.sunrise >= startMs && sun.sunrise <= endMs) {
+                out.push(sun.sunrise);
+            }
+            if (sun.sunset != null && sun.sunset >= startMs && sun.sunset <= endMs) {
+                out.push(sun.sunset);
+            }
+        }
+        return out;
+    }
+
+    // Dispatcher used by sparkSvg() (gradient stops) and fmtHeadline()
+    // (headline value). One function per category keeps the call site
+    // free of branching and means the gradient stops can be built in a
+    // single .map() pass.
+    function sparkLineColor(category, v) {
+        if (v == null || isNaN(v)) return '#94a3b8';
+        if (category === 'temp')     return tempColor(v);
+        if (category === 'wind')     return windColor(v);
+        if (category === 'pressure') return pressureColorBass(v);
+        return '#94a3b8';
+    }
+
+    // Headline formatter — current value as a SUMMARY of the chart below it.
+    //
+    // Color comes from the value's IDENTITY on the absolute scale (cold
+    // blue, warm yellow, hot orange for temp; bass valence for pressure).
+    // The rightmost point of the sparkline IS the current value, so
+    // headline-color and sparkline-end-color match by construction.
+    //
+    // The arrow indicates direction over the longest available window
+    // (p72 → p48 → p24 fallback), with the band scaled to whichever
+    // window we ended up using. Arrow color is intentionally muted slate
+    // — direction is informational, the *identity color* (number) carries
+    // the verdict. Decoupling these axes lets a "warming day at a hot
+    // peak" read differently from a "cooling day at a hot peak" without
+    // letting trend hijack the color story.
+    function fmtHeadline(category, cat, fmtVal) {
+        if (cat.now == null) return '—';
+        const nowStr = fmtVal(cat.now);
+        const color  = sparkLineColor(category, cat.now);
+
+        const d = cat.deltas || {};
+        let v, windowH;
+        if (d.p72 != null)      { v = d.p72; windowH = 72; }
+        else if (d.p48 != null) { v = d.p48; windowH = 48; }
+        else                    { v = d.p24; windowH = 24; }
+
+        // No history → just the value in its identity color, no arrow.
+        if (v == null) {
+            return `<span style="color: ${color}">${nowStr}</span>`;
+        }
+
+        // Arrow appears when |v| >= drift/4 — a more permissive threshold
+        // than the polarity drift band itself, so direction shows even
+        // inside the noise zone (with the magnitude staying neutral-colored
+        // there). drift/4 mirrors fmtDelta() so the tiles and headline
+        // agree on what counts as "noticeable movement."
+        const b = bandsFor(category, windowH);
+        const showArrow = Math.abs(v) >= b.drift / 4;
+        if (!showArrow) {
+            return `<span style="color: ${color}">${nowStr}</span>`;
+        }
+        const arrow = (v >= 0) ? '↑' : '↓';
+        return `<span class="di-headline-arrow">${arrow}</span> <span style="color: ${color}">${nowStr}</span>`;
+    }
+
+    // Delta tile formatter.
+    //
+    // Two axes, deliberately decoupled:
+    //   ARROW   shows raw direction (↑/↓) in a single neutral slate color.
+    //           Visible when |v| >= drift/4 — i.e. anything more than a
+    //           quarter of the noise band, which lets direction read
+    //           honestly even inside the drift zone.
+    //   COLOR   on the magnitude number carries the FISHING tier from
+    //           deltaPolarity() — bands now scale by windowH (24/48/72),
+    //           so a 6 mmHg fall over 24h reads "good (action band)"
+    //           while the same 6 mmHg over 72h reads "neutral (drift)".
+    //
+    // Why decouple them: if color carries both direction AND magnitude
+    // ("yellow ↑ rising", "red ↑ rising fast"), then drift becomes
+    // impossible to display honestly — a soft rise in the noise zone
+    // still gets the "rising" warning hue even though the scoring rules
+    // say there's no signal. Splitting the axes means drift always
+    // reads as drift (neutral magnitude) regardless of direction.
+    //
+    // absNow is the current absolute value — only meaningful for wind,
+    // where dead calm RIGHT NOW overrides any "settling is good" trend.
+    function fmtDelta(category, v, windowH, digits, absNow) {
+        if (v == null) return `<span class="di-delta-val dim">—</span>`;
+        const b = bandsFor(category, windowH);
+        const d = digits == null ? 1 : digits;
+        const mag = Math.abs(v).toFixed(d);
+        const pol = deltaPolarity(category, v, absNow, windowH);
+        const showArrow = Math.abs(v) >= b.drift / 4;
+        const arrowHtml = showArrow
+            ? `<span class="di-delta-arrow">${v >= 0 ? '↑' : '↓'}</span>`
+            : '';
+        return `<span class="di-delta-val">${arrowHtml}<span class="pol-${pol}">${mag}</span></span>`;
+    }
+
+    // SVG sparkline + Windy-style filled area. preserveAspectRatio="none"
+    // stretches across whatever width the card gives us.
+    //
+    // Y-axis = SHARED across the whole forecast window. We use cat.bounds
+    // (computed by the engine over past 3d + 7d forward) so clicking through
+    // day tabs reveals the actual "shape of the week" — a flat Today sits low
+    // on the temp chart, a Wed heatwave peak sits near the top, all on the
+    // same scale. Falls back to local min/max + floor if bounds are missing
+    // (e.g. JSON-only path before Open-Meteo enrichment).
+    //
+    // Color = per-point absolute value (mirrors the Data view's daily charts).
+    // Two gradients work together:
+    //   • horizontal value-based gradient — one stop per sample, color from
+    //     sparkLineColor(category, v). Applied to BOTH stroke and fill, so
+    //     line and area share the same hue at every x.
+    //   • vertical mask — white-with-low-opacity gradient (30% top → 2%
+    //     bottom). Multiplies the fill's alpha so it fades into the baseline
+    //     like the original Windy-style area, but keeps the line crisp.
+    //
+    // Reading the sparkline L→R you now see the value's identity along time:
+    // cold blues in the morning, warm yellows in the afternoon, red at peak.
+    // Three days of overnight cold + daytime warmth stitched together look
+    // like the Data view's daily temp chart concatenated.
+    function sparkSvg(category, cat, opts) {
+        // Prefer the display-only sparkline (dawn → dusk frame) when the
+        // engine provides one — falls back to the 72h sparkline used for
+        // all engine math when sun data isn't available. The engine
+        // numbers (now, deltas, peakGust, bounds) are computed from
+        // cat.sparkline; this branch only affects the VISUAL line and
+        // the x-axis range. Nothing in the polarity/classification path
+        // reads sparklineDisplay.
+        const spark = (cat.sparklineDisplay && cat.sparklineDisplay.length >= 2)
+            ? cat.sparklineDisplay
+            : cat.sparkline;
+        if (!spark || spark.length < 2) {
+            return `<div class="di-spark-empty">72h trajectory unavailable — limited past data.</div>`;
+        }
+
+        let min, max;
+        if (cat.bounds) {
+            // 8% headroom top + bottom so the curve never touches the edges
+            // — important visual breathing room, especially when a future
+            // day sits at the absolute peak/floor of the window.
+            const pad = (cat.bounds.max - cat.bounds.min) * 0.08;
+            min = cat.bounds.min - pad;
+            max = cat.bounds.max + pad;
+        } else {
+            const vs = spark.map(s => s.v);
+            min = Math.min(...vs);
+            max = Math.max(...vs);
+        }
+        const range = Math.max(max - min, opts.floor);
+
+        // P is split into Px (horizontal) and Py (vertical) so the chart
+        // can stretch edge-to-edge horizontally (Px = 0) while keeping a
+        // few pixels of vertical breathing room (Py = 3) so the line's
+        // peaks and troughs don't clip against the top/bottom edges.
+        const W = 320, H = 110, Px = 0, Py = 3;
+        // Switched from index-based to TIME-BASED x positioning so the
+        // sparkline shares a coordinate system with the night-shading
+        // rectangles below it. Without this, a missing hour (gap in
+        // timestamps) would compress visually on the index axis while
+        // the night rect — drawn at real sunset ms — would slide out of
+        // alignment.
+        //
+        // PREFER cat.dispWindow when present: it's the explicit dawn(72h-ago)
+        // → dusk(today) frame computed in insights.js. Using sample boundaries
+        // (spark[0].t / spark[last].t) lets data gaps shrink the frame —
+        // e.g. if today's last sample lands at 2 PM, the frame would end at
+        // 2 PM instead of dusk, dropping today's daylight band entirely and
+        // creating edge-night strips. The explicit window keeps the chart
+        // visually stable regardless of data availability.
+        const tStart = (cat.dispWindow && cat.dispWindow.start != null)
+            ? cat.dispWindow.start
+            : spark[0].t;
+        const tEnd   = (cat.dispWindow && cat.dispWindow.end   != null)
+            ? cat.dispWindow.end
+            : spark[spark.length - 1].t;
+        const tRange = Math.max(tEnd - tStart, 1);
+        const xForT  = (t) => Px + ((t - tStart) / tRange) * (W - 2 * Px);
+
+        const pts = spark.map(s => {
+            const x = xForT(s.t);
+            const y = H - Py - ((s.v - min) / range) * (H - 2 * Py);
+            return { x, y };
+        });
+        const lineStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        // Close the polygon back to the baseline so the fill makes a Windy-
+        // style area chart: line → bottom-right corner → bottom-left corner.
+        const baseY = H - Py;
+        const fillStr = lineStr +
+            ` ${pts[pts.length - 1].x.toFixed(1)},${baseY.toFixed(1)}` +
+            ` ${pts[0].x.toFixed(1)},${baseY.toFixed(1)}`;
+
+        // Gradient IDs must be unique within the document. With multiple
+        // cards × 3 sparklines each, scope by locId+category.
+        const idBase   = `spark-${opts.locId}-${category}`;
+        const hGradId  = `hg-${idBase}`;     // horizontal value-based gradient
+        const vGradId  = `vg-${idBase}`;     // vertical fade for the mask
+        const maskId   = `m-${idBase}`;      // mask combining the two
+
+        // One <stop> per sample. Stop offsets are sample positions along the
+        // chart's x-range — converted from each sample's timestamp through
+        // the same xForT() projection as the polyline, so the gradient
+        // and line stay in lock-step even with uneven hour spacing.
+        const n = spark.length;
+        const stops = spark.map(s => {
+            const x      = xForT(s.t);
+            const offset = ((x - Px) / (W - 2 * Px)) * 100;
+            const color  = sparkLineColor(category, s.v);
+            return `<stop offset="${offset.toFixed(2)}%" stop-color="${color}"/>`;
+        }).join('');
+
+        // ── Night-shading layer ────────────────────────────────────────────
+        // Mirrors the Data view's sunBarsPlugin: very subtle indigo wash
+        // for night intervals + dashed slate bars at each sunrise/sunset
+        // crossing inside the window. Drawn BEHIND the polygon fill so
+        // the data shape stays the foreground subject.
+        let nightHtml = '';
+        let barsHtml  = '';
+        if (opts.sunByDate) {
+            const nights = nightRangesFor(tStart, tEnd, opts.sunByDate);
+            nightHtml = nights.map(r => {
+                const x = xForT(r.start);
+                const w = Math.max(xForT(r.end) - x, 0.5);
+                return `<rect x="${x.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}" fill="rgba(76,81,191,0.09)"/>`;
+            }).join('');
+            // Drop any crossing that lands within 1 minute of either edge.
+            // Those are the dawn(72h ago)/dusk(today) boundaries that define
+            // the chart's display window itself — rendering a dashed bar
+            // there would just be redrawing the chart's own outer frame and
+            // adds visual noise without conveying new information.
+            const EDGE_EPS = 60 * 1000;
+            const crossings = sunCrossingsIn(tStart, tEnd, opts.sunByDate)
+                .filter(t => (t - tStart) > EDGE_EPS && (tEnd - t) > EDGE_EPS);
+            barsHtml = crossings.map(t => {
+                const x = xForT(t).toFixed(1);
+                return `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="rgba(100,130,160,0.6)" stroke-width="1" stroke-dasharray="3 3"/>`;
+            }).join('');
+        }
+
+        return `
+            <svg class="di-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+                <defs>
+                    <linearGradient id="${hGradId}" x1="0" y1="0" x2="1" y2="0">
+                        ${stops}
+                    </linearGradient>
+                    <linearGradient id="${vGradId}" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%"   stop-color="white" stop-opacity="0.30"/>
+                        <stop offset="100%" stop-color="white" stop-opacity="0.02"/>
+                    </linearGradient>
+                    <mask id="${maskId}">
+                        <rect width="${W}" height="${H}" fill="url(#${vGradId})"/>
+                    </mask>
+                </defs>
+                ${nightHtml}
+                <polygon points="${fillStr}" fill="url(#${hGradId})" mask="url(#${maskId})" stroke="none"/>
+                ${barsHtml}
+                <polyline points="${lineStr}" fill="none" stroke="url(#${hGradId})" stroke-width="1.5"/>
+            </svg>
+        `;
+    }
+
+    // Section renderer — one block per category. Headline value sits inline
+    // with the section label on the same row, then sparkline, then 3 delta
+    // tiles. This is the visual unit Andrew asked for: three of these stack.
+    function section(category, title, cat, opts) {
+        const fmtVal = opts.fmtVal;         // (number) → string
+        const fmtSub = opts.fmtSub;         // optional subtitle on the right (e.g. gust value)
+        const floor  = opts.floor;          // y-range floor (fallback when bounds null)
+        const digits = opts.deltaDigits;    // decimals for delta tile values
+        const unit   = cat.unit || '';
+
+        // Headline now carries 48h trend arrow + polarity color. The unit
+        // and gust sub-line live OUTSIDE the polarity span so they keep
+        // their own muted slate styling — only the number+arrow take color.
+        const headHtml = fmtHeadline(category, cat, fmtVal);
+        const subStr  = fmtSub ? fmtSub(cat) : '';
+        const subHtml = subStr ? `<span class="di-section-sub">${subStr}</span>` : '';
+
+        // ── Chip-to-chart alignment ─────────────────────────────────────────
+        // Each chip sits on the DAY SEGMENT it labels — the full daytime
+        // band (sunrise → sunset) of that day. Night blocks become empty
+        // spacer columns between chips, matching the visual rhythm of the
+        // chart above:
+        //   [lead] [Day 72H = chip] [Night] [Day 48H = chip] [Night] [Day 24H = chip] [trail = Night + today]
+        // 7 columns total, 3 chip cells + 4 spacer cells.
+        //
+        // Why day-segments and not 24h-windows: a 24h-window chip (e.g.
+        // Sat 2 PM → Sun 2 PM) crosses Night 1, so the chip "container"
+        // visually overlaps with a night block in the chart. Day-segments
+        // map each chip to a single daylight band so chip rhythm matches
+        // chart rhythm.
+        //
+        // Falls back to even three-up if sunByDate is missing for any
+        // of the three reference days.
+        const spark = (cat.sparklineDisplay && cat.sparklineDisplay.length >= 2)
+            ? cat.sparklineDisplay
+            : cat.sparkline;
+        let gridCols;   // CSS grid-template-columns value (7 columns)
+        if (spark && spark.length >= 2 && opts.anchorMs != null && opts.sunByDate) {
+            // Mirror sparkSvg's frame logic — prefer the explicit dispWindow
+            // so chip columns align to the SAME x-axis the chart uses, even
+            // when data samples don't reach the dispWindow edges.
+            const tStart = (cat.dispWindow && cat.dispWindow.start != null)
+                ? cat.dispWindow.start
+                : spark[0].t;
+            const tEnd   = (cat.dispWindow && cat.dispWindow.end   != null)
+                ? cat.dispWindow.end
+                : spark[spark.length - 1].t;
+            const tRange = Math.max(tEnd - tStart, 1);
+            const a      = opts.anchorMs;
+            const H      = 3600 * 1000;
+            // Resolve PT date string for an absolute UTC ms — mirrors the
+            // pattern used in insights.js (subtract 7h, read UTC fields).
+            const ptDate = (ts) => {
+                const pt = new Date(ts - 7 * H);
+                return pt.toISOString().slice(0, 10);
+            };
+            const sun72 = opts.sunByDate[ptDate(a - 72 * H)];
+            const sun48 = opts.sunByDate[ptDate(a - 48 * H)];
+            const sun24 = opts.sunByDate[ptDate(a - 24 * H)];
+            const haveAllSun = sun72 && sun72.sunrise && sun72.sunset &&
+                               sun48 && sun48.sunrise && sun48.sunset &&
+                               sun24 && sun24.sunrise && sun24.sunset;
+            if (haveAllSun) {
+                const clamp01 = (x) => Math.max(0, Math.min(1, x));
+                const f       = (t) => clamp01((t - tStart) / tRange);
+                const lead  = (f(sun72.sunrise) - 0)                    * 100;
+                const w72   = (f(sun72.sunset)  - f(sun72.sunrise))     * 100;
+                const gap1  = (f(sun48.sunrise) - f(sun72.sunset))      * 100;
+                const w48   = (f(sun48.sunset)  - f(sun48.sunrise))     * 100;
+                const gap2  = (f(sun24.sunrise) - f(sun48.sunset))      * 100;
+                const w24   = (f(sun24.sunset)  - f(sun24.sunrise))     * 100;
+                const trail = (1 - f(sun24.sunset))                     * 100;
+                gridCols = `${lead.toFixed(2)}% ${w72.toFixed(2)}% ${gap1.toFixed(2)}% ${w48.toFixed(2)}% ${gap2.toFixed(2)}% ${w24.toFixed(2)}% ${trail.toFixed(2)}%`;
+            } else {
+                // Missing sun info for one of the three reference days →
+                // fall back to even 3-up (spacers collapsed to 0%).
+                gridCols = `0% 33.33% 0% 33.33% 0% 33.34% 0%`;
+            }
+        } else {
+            // No spark, no anchor, or no sunByDate → fall back to even 3-up.
+            gridCols = `0% 33.33% 0% 33.33% 0% 33.34% 0%`;
+        }
+
+        return `
+            <div class="di-section">
+                <div class="di-section-head">
+                    <div class="di-section-label">${title}</div>
+                    <div class="di-section-val">
+                        ${headHtml}<span class="di-section-unit">${unit}</span>${subHtml}
+                    </div>
+                </div>
+                ${sparkSvg(category, cat, { floor, locId: loc.id, sunByDate: opts.sunByDate })}
+                <div class="di-deltas" style="grid-template-columns: ${gridCols};">
+                    <!-- 7-cell grid mirroring the chart's day/night rhythm:
+                           [lead] [72H day] [Night 1] [48H day] [Night 2] [24H day] [trail]
+                         Each chip occupies the sunrise→sunset band of its
+                         reference day; the spacer cells fall under the
+                         night blocks (and the dusk-extension trail).
+                         The 24H chip carries the scoring verdict (Signal 1
+                         in the scoring rules — what state are bass in RIGHT
+                         NOW). The 48H and 72H chips are SUPPORTING CONTEXT
+                         (.ctx — same hue family, lower saturation) so the
+                         eye reads them as context, not three equal
+                         verdicts.
+                         Chips are now SINGLE-LINE captions (label + arrow +
+                         number); horizontal POSITION on the day band is the
+                         only visual link to the chart — no tile chrome. -->
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta ctx">
+                        <span class="di-delta-label">72h</span>
+                        ${fmtDelta(category, cat.deltas.p72, 72, digits, cat.now)}
+                    </div>
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta ctx">
+                        <span class="di-delta-label">48h</span>
+                        ${fmtDelta(category, cat.deltas.p48, 48, digits, cat.now)}
+                    </div>
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta">
+                        <span class="di-delta-label">24h</span>
+                        ${fmtDelta(category, cat.deltas.p24, 24, digits, cat.now)}
+                    </div>
+                    <div class="di-delta-spacer"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Sun data flows from rawD (built once per location in fetch path,
+    // keyed by 'YYYY-MM-DD' PT date) through every section so the
+    // sparklines can shade night intervals.
+    const sunByDate = rawD && rawD.sunByDate;
+
+    const pressureSection = section('pressure', 'Pressure', di.pressure, {
+        fmtVal: v => v.toFixed(1),
+        floor: 0.5,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+    const tempSection = section('temp', 'Temperature', di.temp, {
+        fmtVal: v => v.toFixed(1),
+        floor: 1.0,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+    const windSection = section('wind', 'Wind & gust', di.wind, {
+        fmtVal: v => v.toFixed(1),
+        // peak gust appears as a sub-stat on the right of the headline
+        fmtSub: cat => cat.peakGust != null
+            ? `· gust ${cat.peakGust.toFixed(1)} <span class="di-section-sub-unit">m/s</span>`
+            : '',
+        floor: 0.5,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+
+    return `
+        <div class="di-pane">
+            <div class="di-top">
+                <div class="di-chip tone-${tone}" title="${di.phase} · confidence: ${conf}">
+                    ${label}
+                    <span class="di-dot ${conf}"></span>
+                </div>
+                <div class="di-rationale-block">
+                    <div class="di-day-label">${dayLabel}</div>
+                    ${di.rationale}
+                </div>
+            </div>
+            ${pressureSection}
+            ${tempSection}
+            ${windSection}
+        </div>
+    `;
+}
+
+// Flip the per-card view between Data (default) and Insights (phase chip +
+// 72h trajectory). Per-card on purpose: switching one card doesn't disturb
+// the others. Re-uses populateCard so the rendering path stays single-source.
+function setCardView(locId, view, btn) {
+    if (view !== 'data' && view !== 'insights') view = 'data';
+    cardView[locId] = view;
+
+    // Toggle the active class on this card's pair only
+    const switcher = btn && btn.parentElement;
+    if (switcher) {
+        switcher.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    }
+
+    // Re-render this card. populateCard branches on cardView[loc.id].
+    const loc = locations.find(l => l.id === locId);
+    const rawD = weatherData[locId];
+    if (loc && rawD) populateCard(loc, rawD);
+}
+
 // ── Insights (bass fishing) ──────────────────────────────────────────────────
 // renderSummary() is the public entry point — keeps the historical name so all
 // the existing call sites (refresh, water-switch, period-switch, model-switch)
@@ -3418,6 +4564,37 @@ function insightScoreClass(score) {
     if (score >= 30) return 'low';   // orange
     return 'bad';                    // red
 }
+
+// Phase → semantic tone (5-tier polarity per project memory) and short label
+// for chips. Module-scope so all three lenses (weeklyOutlook arc, weekend
+// scoring cards, daily Insights view) share one source of truth — keeping
+// the maps in lockstep is called out explicitly in the phase-taxonomy memory.
+// SETTLED  = mid-band quiet → good-mild (stable regime, biology dominates).
+// LOW_STABLE = parked weak low → warn (bass sluggish, distinct from SETTLED).
+// UNSTABLE = classifier gap → neutral (NOT a verdict, an "I don't know").
+const PHASE_TONE_MAP = {
+    PRE_FRONT:   'good',
+    STABLE_HIGH: 'good-mild',
+    SETTLED:     'good-mild',
+    LOW_STABLE:  'warn',
+    PASSAGE:     'warn',
+    DAY_1_POST:  'bad',
+    DAY_2_POST:  'warn',
+    RIDGE:       'warn',
+    UNSTABLE:    'neutral'
+};
+// Short labels — keep ≤7 chars so chips don't blow up at small breakpoints.
+const PHASE_LABEL_MAP = {
+    PRE_FRONT:   'PRE',
+    STABLE_HIGH: 'STABLE',
+    SETTLED:     'STEADY',
+    LOW_STABLE:  'LOW',
+    PASSAGE:     'PASS',
+    DAY_1_POST:  'D1 POST',
+    DAY_2_POST:  'D2 POST',
+    RIDGE:       'RIDGE',
+    UNSTABLE:    'UNSURE'
+};
 
 // Weekly outlook renderer — picks up macro pattern data from INSIGHTS.weeklyOutlook
 // and composes a single readable line. Hidden when the engine returns null
@@ -3498,12 +4675,64 @@ function renderWeeklyOutlook() {
         impactLine = `Most affected: <strong>${outlook.mostImpacted.name}</strong> (${outlook.mostImpacted.rangeC.toFixed(1)}°C swing) · Least: <strong>${outlook.leastImpacted.name}</strong> (${outlook.leastImpacted.rangeC.toFixed(1)}°C)`;
     }
 
+    // ── Track A additions: week pattern tag + phase arc (PRD §2) ────────────
+    // outlook.weekTag : { tag, confidence, evidence } | null
+    // outlook.phases  : [{ date, phase, confidence }, ...] | null
+    //
+    // Renderer is defensive — if either is missing (engine failure, old data
+    // shape, or not enough history) the row is simply omitted. No breakage.
+    // PHASE_TONE_MAP / PHASE_LABEL_MAP live at module scope (top of file).
+
+    let weekTagHtml = '';
+    if (outlook.weekTag && outlook.weekTag.tag) {
+        const wt = outlook.weekTag;
+        const conf = wt.confidence || 'medium';
+        weekTagHtml = `
+            <div class="wo-week-tag">
+                <span class="wt-label">Week pattern</span>
+                <span class="wt-value">${wt.tag}</span>
+                <span class="wt-sep">·</span>
+                <span class="wt-conf ${conf}">confidence: ${conf}</span>
+            </div>
+        `;
+    }
+
+    let phaseArcHtml = '';
+    if (Array.isArray(outlook.phases) && outlook.phases.length > 0) {
+        // ISO → short weekday for the chip label (Sat / Sun / …).
+        const shortDay = iso => {
+            const [y, m, d] = iso.split('-').map(Number);
+            const dt = new Date(Date.UTC(y, m - 1, d, 12));
+            return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
+        };
+        const cells = outlook.phases.map(p => {
+            const tone   = PHASE_TONE_MAP[p.phase]  || 'neutral';
+            const label  = PHASE_LABEL_MAP[p.phase] || p.phase;
+            const conf   = p.confidence || 'low';
+            const dayLbl = shortDay(p.date);
+            // Tooltip carries the full phase name + confidence for affordance.
+            const title = `${p.phase} · confidence: ${conf}`;
+            return `
+                <div class="wo-phase-cell" title="${title}">
+                    <span class="wpc-day">${dayLbl}</span>
+                    <div class="wo-phase-chip tone-${tone}">
+                        ${label}
+                        <span class="wpc-dot ${conf}"></span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        phaseArcHtml = `<div class="wo-phase-arc">${cells}</div>`;
+    }
+
     el.className = `weekly-outlook ${outlook.pattern}`;
     el.style.display = '';
     el.innerHTML = `
         <div class="wo-label">Weekly outlook</div>
         <div class="wo-headline">${headline}</div>
         ${impactLine ? `<div class="wo-impact">${impactLine}</div>` : ''}
+        ${weekTagHtml}
+        ${phaseArcHtml}
     `;
 }
 
