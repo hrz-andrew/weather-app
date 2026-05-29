@@ -1,0 +1,3700 @@
+// We switched from Windy Point Forecast → Open-Meteo because Windy's free API
+// returns `temp-surface` as the model's skin/ground temperature (not 2m air
+// temperature) for every model. That's why temps oscillated 10°C every 3h and
+// didn't match windy.com's display. Open-Meteo exposes true 2m air temp
+// (temperature_2m), needs no API key, and supports multiple forecast models.
+const API_URL = 'https://api.open-meteo.com/v1/forecast';
+const FORECAST_DAYS = 15;                    // how many days of forecast to request + render
+// We also request 1 past day from the API. That matters because we use
+// `timezone: 'UTC'` — if we didn't, a late-evening PT user would see the API
+// window start at 00:00 UTC (= 5 PM PT), cutting off today's morning hours.
+// The extra past day gives us those PT-morning hours. Hence +1 day of steps.
+const HOURS_SHOWN   = (FORECAST_DAYS + 1) * 8 + 4;  // 3h cadence = 8 steps/day, small buffer
+
+// Map our UI model keys to Open-Meteo model identifiers
+const OPEN_METEO_MODELS = {
+    'gfs':         'gfs_seamless',    // NOAA GFS (global, ~13km)
+    'namConus':    'ncep_nam_conus',  // NOAA NAM North America (~12km, 84h range)
+    'ecmwf':       'ecmwf_ifs025',   // ECMWF IFS via API (~25km, widely regarded as best overall)
+    'ecmwf-local': null              // ECMWF scraped from Windy — handled by local file, never calls API
+};
+
+// Two curated location sets, switchable via the top-of-page Freshwater/Saltwater
+// toggle. IDs are namespaced (1–99 fresh, 100+ salt) so cache entries don't
+// collide when the user toggles back and forth.
+const LOCATION_SETS = {
+    freshwater: [
+        { id: 1, name: 'Belmont',           label: 'Belmont, CA 94002',             lat: 37.504,  lon: -122.301 },
+        { id: 2, name: 'Almaden Reservoir', label: 'Almaden Reservoir, CA',         lat: 37.163,  lon: -121.836 },
+        { id: 3, name: 'Lake Del Valle',    label: 'Lake Del Valle, CA (Livermore)', lat: 37.591,  lon: -121.737 },
+        { id: 4, name: 'Uvas Reservoir',    label: 'Uvas Reservoir, CA',            lat: 37.073,  lon: -121.701 },
+        { id: 5, name: 'Coyote Reservoir',  label: 'Coyote Reservoir, CA',          lat: 37.096,  lon: -121.540 }
+    ],
+    saltwater: [
+        { id: 101, name: 'Ocean Beach',        label: 'Ocean Beach, San Francisco', lat: 37.7594, lon: -122.5107 },
+        { id: 102, name: 'Morro Rock',         label: 'Morro Rock, Morro Bay',      lat: 35.3687, lon: -120.8687 },
+        { id: 103, name: 'San Gregorio Beach', label: 'San Gregorio State Beach',   lat: 37.3244, lon: -122.4006 }
+    ]
+};
+
+let activeLocationSet = localStorage.getItem('wx-locset') || 'freshwater';
+if (!LOCATION_SETS[activeLocationSet]) activeLocationSet = 'freshwater';
+let locations = LOCATION_SETS[activeLocationSet].map(l => ({ ...l }));
+
+// Restore cached weather + fetch timestamps from localStorage so rapid reloads
+// don't re-hit the API (and don't flicker with slightly different API values).
+let weatherData = {};
+let weatherFetchedAt = {};   // locId → Date.now() timestamp of last successful fetch
+// v2 keys — bumped when we switched from Windy → Open-Meteo so stale data from
+// the old API (which returned skin temps) is automatically ignored.
+// v3 — bumped from v2 when cloud_cover + weather_code were added to processData.
+// v4 — bumped when sunrise / sunset daily data was added.
+// v5 — bumped when the forecast window grew from 10 → 15 days; older caches
+// would show "no data" for the extra tabs until they expired naturally.
+// v6 — bumped when we started requesting past_days=1 so today's PT-morning
+// hours aren't missing in late-evening sessions.
+// v7 — bumped when past_days grew 1 → 3 to feed the daily Insights toggle a
+// full 72h backward window for phase classification.
+const CACHE_DATA_KEY    = 'wx-data-v7';
+const CACHE_FETCHED_KEY = 'wx-fetchedAt-v7';
+try {
+    weatherData      = JSON.parse(localStorage.getItem(CACHE_DATA_KEY)    || '{}');
+    weatherFetchedAt = JSON.parse(localStorage.getItem(CACHE_FETCHED_KEY) || '{}');
+    // Clean up older cache generations
+    localStorage.removeItem('wx-data');        localStorage.removeItem('wx-fetchedAt');
+    localStorage.removeItem('wx-data-v2');     localStorage.removeItem('wx-fetchedAt-v2');
+    localStorage.removeItem('wx-data-v3');     localStorage.removeItem('wx-fetchedAt-v3');
+    localStorage.removeItem('wx-data-v4');     localStorage.removeItem('wx-fetchedAt-v4');
+    localStorage.removeItem('wx-data-v5');     localStorage.removeItem('wx-fetchedAt-v5');
+    localStorage.removeItem('wx-data-v6');     localStorage.removeItem('wx-fetchedAt-v6');
+} catch (e) {
+    console.warn('Could not restore cache from localStorage:', e);
+    weatherData = {}; weatherFetchedAt = {};
+}
+let chartInstances = {};
+// Per-location filtered view data keyed by loc.id, used by the hover handler to
+// update card header values + peek highlight as the user moves across the chart.
+let filteredDataCache = {};
+let nextId = 4;
+// activePeriod is now a PT date string ("YYYY-MM-DD"). Defaults to today.
+let activePeriod = null;  // set by renderDayTabs() / init()
+let activeModel  = localStorage.getItem('wx-model-v2') || 'ecmwf-local'; // v2 resets default to ecmwf-local
+// Which chart is shown inside every card — 'temp' or 'wind'. Switching on one
+// card applies to all cards (cross-card tab sync) and is persisted.
+let activeChartTab = localStorage.getItem('wx-chart-tab') || 'temp';
+// Card view: 'data' (default) or 'insights' (phase chip + 72h trajectory).
+// GLOBAL state — clicking Insights on any card flips ALL cards, same as how
+// the chart tab and day tabs already sync across cards. Single mental model:
+// view selection is a lens applied to the whole dashboard, not a per-card
+// setting. Persisted to localStorage so the chosen lens survives reloads.
+let activeCardView = localStorage.getItem('wx-card-view') || 'data';
+// NOTE: For the Windy Point Forecast free API, `temp-surface` is interpreted
+// differently per model:
+//   • GFS   → 2m air temperature (what a thermometer reads) ✓
+//   • NAM   → skin/ground temperature (can swing 10°C in 3h as sun hits the surface) ✗
+// That's why NAM values oscillate wildly and don't match windy.com's display.
+// windy.com post-processes NAM skin-temp into 2m air-temp internally; the free
+// API doesn't expose that derived field. Default to GFS for reliable air temps.
+const CACHE_MINUTES = 30;    // don't re-fetch if data is younger than this
+
+// Persist weather cache to localStorage. Called after every successful fetch.
+function persistCache() {
+    try {
+        localStorage.setItem(CACHE_DATA_KEY,    JSON.stringify(weatherData));
+        localStorage.setItem(CACHE_FETCHED_KEY, JSON.stringify(weatherFetchedAt));
+    } catch (e) {
+        // Quota exceeded or storage disabled — fall back silently
+        console.warn('Could not persist cache to localStorage:', e);
+    }
+}
+
+// ── Unit helpers ──────────────────────────────────────────────────────────────
+const kToC  = k  => (k - 273.15).toFixed(1);
+const msToMs = ms => ms.toFixed(1);
+const windDeg = (u, v) => (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+const degToCompass = d => ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(d/22.5)%16];
+
+// ── Period / timezone helpers ──────────────────────────────────────────────────
+const PT = 'America/Los_Angeles';
+
+// Returns ISO date string "YYYY-MM-DD" in PT for a UTC timestamp
+function ptDateStr(ts) {
+    return new Date(ts).toLocaleDateString('en-CA', { timeZone: PT });
+}
+
+// Returns PT weekday 0=Sun … 6=Sat
+function ptWeekday(ts) {
+    const wd = new Date(ts).toLocaleDateString('en-US', { timeZone: PT, weekday: 'short' });
+    return { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 }[wd] ?? 0;
+}
+
+// Returns "YYYY-MM-DD" offset by N calendar days (using noon UTC to dodge DST edge cases)
+function ptDateStrOffset(days) {
+    const today = ptDateStr(Date.now());            // e.g. "2026-04-21"
+    const [y, m, d] = today.split('-').map(Number);
+    const target = new Date(Date.UTC(y, m - 1, d + days, 12, 0, 0));
+    return ptDateStr(target.getTime());
+}
+
+// Returns UTC ms for a given PT calendar date + hour (24h).
+// DST-safe: probes the PT offset on THAT specific date rather than assuming
+// a fixed UTC-7 / UTC-8 shift. We were previously hardcoding 19:00 UTC = noon
+// PDT, which silently drifts by an hour in winter (PST). With this helper,
+// a 14:00 PT anchor stays at "2 PM in Bay Area local time" all year.
+function ptHourToUtcMs(yyyyMmDd, hourPT) {
+    const [y, m, d] = yyyyMmDd.split('-').map(Number);
+    // Probe: noon UTC on that calendar date is unambiguously the same UTC
+    // day, regardless of DST, so the PT timezone view of it is well-defined.
+    const probe = Date.UTC(y, m - 1, d, 12, 0, 0);
+    const probePtHour = parseInt(
+        new Intl.DateTimeFormat('en-US', {
+            timeZone: PT, hour: 'numeric', hour12: false
+        }).formatToParts(new Date(probe))
+          .find(p => p.type === 'hour').value,
+        10
+    );
+    return probe + (hourPT - probePtHour) * 3600 * 1000;
+}
+
+// Slice the full processed data to only timestamps matching the active day
+// (period is a PT calendar date string like "2026-04-21"). We always return
+// the full day — including hours that have already passed on today's view —
+// so the chart renders a complete 24h picture regardless of wall-clock time.
+// The "Now" highlight tracks the current hour separately via defaultIndex().
+function filterByPeriod(d, period) {
+    if (!period) return null;
+
+    const idx = d.timestamps.reduce((acc, ts, i) => {
+        if (ptDateStr(ts) === period) acc.push(i);
+        return acc;
+    }, []);
+    if (!idx.length) return null;
+
+    // Sunrise / sunset for the active day, if we have daily data for it.
+    const sunForDay = (d.sunByDate && d.sunByDate[period]) || {};
+
+    return {
+        timestamps: idx.map(i => d.timestamps[i]),
+        windSpeed:  idx.map(i => d.windSpeed[i]),
+        windDir:    idx.map(i => d.windDir[i]),
+        gusts:      idx.map(i => d.gusts[i]),
+        temp:       idx.map(i => d.temp[i]),
+        precip:     idx.map(i => d.precip[i]),
+        rh:         idx.map(i => d.rh[i]),
+        cloud:      idx.map(i => d.cloud      ? d.cloud[i]      : null),
+        wcode:      idx.map(i => d.wcode      ? d.wcode[i]      : null),
+        pressure:   idx.map(i => d.pressure   ? d.pressure[i]   : null),
+        cloud_base: idx.map(i => d.cloud_base ? d.cloud_base[i] : null),
+        uv_index:   idx.map(i => d.uv_index   ? d.uv_index[i]   : null),
+        sunrise:    sunForDay.sunrise || null,
+        sunset:     sunForDay.sunset  || null
+    };
+}
+
+// Set active day (period = PT date string), update button states, re-render everything
+function setActivePeriod(period, btn) {
+    activePeriod = period;
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    // Re-render all loaded cards and summary
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    renderSummary();
+}
+
+// Build the list of days in the current forecast window — today plus the
+// next FORECAST_DAYS - 1 days in PT. We no longer show past days since we
+// don't fetch history. Returns [{ dateStr, weekday, dayNum, isToday }, ...].
+function getForecastDays() {
+    const todayStr = ptDateStr(Date.now());
+    const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const out = [];
+    for (let i = 0; i < FORECAST_DAYS; i++) {
+        const dateStr = ptDateStrOffset(i);
+        const [y, m, day] = dateStr.split('-').map(Number);
+        // weekday of this date (use UTC noon to dodge DST boundary issues,
+        // same pattern as ptDateStrOffset itself).
+        const refUtc = Date.UTC(y, m - 1, day, 12, 0, 0);
+        const wd = ptWeekday(refUtc);
+        out.push({
+            dateStr,
+            weekday:   names[wd],
+            dayNum:    day,
+            isToday:   dateStr === todayStr,
+            isWeekend: wd === 0 || wd === 6          // Sat + Sun
+        });
+    }
+    return out;
+}
+
+// Render the day-picker bar above the location cards. Today is highlighted
+// and labeled "Today"; the rest show a weekday abbreviation + day number.
+// Keeps activePeriod in sync when it points to a date we no longer render.
+function renderDayTabs() {
+    const toggle = document.getElementById('period-toggle');
+    if (!toggle) return;
+    const days = getForecastDays();
+    const todayStr = days[0].dateStr;
+    const lastStr  = days[days.length - 1].dateStr;
+
+    // If activePeriod is unset, in the past, or past the end of our window,
+    // snap it back to today so we always have a valid selection.
+    if (!activePeriod || activePeriod < todayStr || activePeriod > lastStr) {
+        activePeriod = todayStr;
+    }
+
+    toggle.innerHTML = days.map(d => {
+        const active  = d.dateStr === activePeriod ? 'active' : '';
+        const weekend = d.isWeekend ? 'weekend' : '';
+        const label   = d.isToday
+            ? `<span class="day-name">Today</span><span class="day-date">${d.weekday} ${d.dayNum}</span>`
+            : `<span class="day-name">${d.weekday}</span><span class="day-date">${d.dayNum}</span>`;
+        return `<button class="period-btn ${active} ${weekend}"
+                   onclick="setActivePeriod('${d.dateStr}', this)"
+                   title="${d.dateStr}">${label}</button>`;
+    }).join('');
+}
+
+// Switch forecast model and re-fetch all locations (cache is model-specific)
+function toggleModelDropdown(e) {
+    e.stopPropagation();
+    document.getElementById('model-dropdown-menu').classList.toggle('open');
+}
+function closeModelDropdown() {
+    document.getElementById('model-dropdown-menu').classList.remove('open');
+}
+// Close dropdown when clicking anywhere outside it
+document.addEventListener('click', () => closeModelDropdown());
+
+async function setModel(model, btn) {
+    if (model === activeModel) return;
+    activeModel = model;
+    localStorage.setItem('wx-model-v2', model);
+    document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    // If selected model is inside the dropdown, also highlight the More button
+    const dropdownModels = ['gfs', 'namConus'];
+    const moreBtn = document.getElementById('btn-more-models');
+    if (dropdownModels.includes(model)) {
+        if (moreBtn) { moreBtn.classList.add('active'); moreBtn.textContent = (btn?.textContent || 'More') + ' ▾'; }
+    } else {
+        if (moreBtn) { moreBtn.classList.remove('active'); moreBtn.textContent = 'More ▾'; }
+    }
+    // Clear cache — different model, different data (and clear persisted copy)
+    weatherFetchedAt = {};
+    weatherData = {};
+    persistCache();
+    await refreshAll(true);
+}
+
+// Swap between the Freshwater and Saltwater location sets. Tear down any
+// existing cards + chart instances, swap the `locations` array, then rebuild.
+// Cached data stays keyed by location id so switching back is near-instant.
+async function setLocationSet(setName, btn) {
+    if (!LOCATION_SETS[setName] || setName === activeLocationSet) return;
+    activeLocationSet = setName;
+    localStorage.setItem('wx-locset', setName);
+
+    document.querySelectorAll('.water-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+
+    // Destroy all current Chart.js instances so they don't leak (canvases get
+    // thrown away when we wipe the grid below anyway, but Chart keeps a ref).
+    Object.values(chartInstances).forEach(c => { try { c.destroy(); } catch (e) {} });
+    chartInstances = {};
+    filteredDataCache = {};
+
+    // Swap the active location list and rebuild the grid from scratch.
+    locations = LOCATION_SETS[setName].map(l => ({ ...l }));
+    const grid = document.getElementById('locations-grid');
+    if (grid) grid.innerHTML = '';
+    locations.forEach(createCard);
+
+    // Render whatever's already cached instantly, then (re)fetch anything stale.
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    renderSummary();
+    for (const loc of locations) { await loadLocation(loc, false); }
+}
+
+
+function fmtHour(ts) {
+    const d = new Date(ts);
+    const h = d.toLocaleString('en-US', { hour: 'numeric', hour12: true, timeZone: 'America/Los_Angeles' });
+    if (d.getHours() === 0) {
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Los_Angeles' });
+    }
+    return h;
+}
+
+// ── API (Open-Meteo) ─────────────────────────────────────────────────────────
+async function fetchWeather(loc) {
+    const model = OPEN_METEO_MODELS[activeModel] || OPEN_METEO_MODELS.ecmwf;
+    const params = new URLSearchParams({
+        latitude:  loc.lat,
+        longitude: loc.lon,
+        hourly:    'temperature_2m,dew_point_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,relative_humidity_2m,cloud_cover,weather_code,pressure_msl',
+        // daily sunrise + sunset — used to shade night hours (moon glyph when
+        // the sky is clear) and draw vertical dashed bars on the temp chart.
+        daily:     'sunrise,sunset',
+        wind_speed_unit: 'ms',
+        timezone:  'UTC',          // we'll convert to PT on display
+        forecast_days: FORECAST_DAYS,
+        // Pull in 3 previous UTC days so the daily Insights chip has a full
+        // 72h backward window for phase classification (pressure deltas
+        // 24h/48h/72h). filterByPeriod() still slices by PT calendar date for
+        // the forward-facing views, so these extra hours only surface in the
+        // Insights pane.
+        past_days: 3,
+        models:    model
+    });
+    // Retry once on 429 (rate limit) after a short back-off
+    let res = await fetch(`${API_URL}?${params}`);
+    if (res.status === 429) {
+        await new Promise(r => setTimeout(r, 1500));
+        res = await fetch(`${API_URL}?${params}`);
+    }
+    if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`API ${res.status}: ${txt.slice(0,200)}`);
+    }
+    return res.json();
+}
+
+// Turn an Open-Meteo hourly response into the internal shape the rest of the
+// dashboard expects. Temperatures are stored in Kelvin to keep kToC() happy —
+// Open-Meteo returns °C, so we add 273.15 then kToC will subtract it back.
+function processData(raw) {
+    const h = raw && raw.hourly;
+    if (!h || !h.time) throw new Error('Open-Meteo response missing hourly data');
+
+    // Time strings are in UTC (timezone=UTC), format "YYYY-MM-DDTHH:MM" without Z.
+    // Append Z to force UTC interpretation regardless of browser timezone.
+    const allTs    = h.time.map(s => Date.parse(s + 'Z'));
+    const allTemp  = h.temperature_2m;
+    const allWind  = h.wind_speed_10m;
+    const allDir   = h.wind_direction_10m;
+    const allGust  = h.wind_gusts_10m;
+    const allPrcp  = h.precipitation     || new Array(allTs.length).fill(0);
+    const allRh    = h.relative_humidity_2m || new Array(allTs.length).fill(null);
+    const allCloud = h.cloud_cover          || new Array(allTs.length).fill(null);
+    const allWcode = h.weather_code         || new Array(allTs.length).fill(null);
+    const allPress = h.pressure_msl         || new Array(allTs.length).fill(null);
+    const allDewp  = h.dew_point_2m         || new Array(allTs.length).fill(null);
+    // Cloud base estimated from Lifted Condensation Level: (T - Td) × 400 ft per °C.
+    // This approximates the base of convective cloud well for maritime/coastal air.
+    const allCbase = allTemp.map((t, i) => {
+        const td = allDewp[i];
+        if (t == null || td == null) return null;
+        const lcl = Math.round((t - td) * 400);
+        return lcl > 0 ? lcl : null;
+    });
+
+    // Subsample to 3-hour cadence (matches the existing UX: 2 AM, 5 AM, 8 AM …)
+    // We pick indices where the UTC hour is a multiple of 3 so the display
+    // lands on clean 3-hour boundaries (9, 12, 15, 18, 21, 0, 3, 6 UTC = every
+    // synoptic time).
+    const idx = [];
+    for (let i = 0; i < allTs.length; i++) {
+        if (new Date(allTs[i]).getUTCHours() % 3 === 0) idx.push(i);
+        if (idx.length >= HOURS_SHOWN) break;
+    }
+
+    // Diagnostics — same flavor as before, so the 🔍 debug button still works
+    console.log('[Open-Meteo] model key:', activeModel, '→', OPEN_METEO_MODELS[activeModel]);
+    console.log('[Open-Meteo] elevation:', raw.elevation, 'm · tz:', raw.timezone);
+    console.log('[Open-Meteo] hourly keys:', Object.keys(h).join(', '));
+    console.log('[Open-Meteo] hourly length:', allTs.length, '· subsampled:', idx.length);
+    if (idx.length) {
+        console.log('[Open-Meteo] first subsampled ts (UTC):', new Date(allTs[idx[0]]).toUTCString());
+    }
+
+    // Build a lookup of sunrise / sunset moments keyed by the PT calendar date
+    // on which they occur. Sunset in SF (e.g. 7:50 PM PT on Apr 21) arrives as
+    // UTC "2026-04-22T02:50" — ptDateStr() puts it back on "2026-04-21".
+    const sunByDate = {};
+    const daily = raw && raw.daily;
+    if (daily && daily.time) {
+        const dSunrise = daily.sunrise || [];
+        const dSunset  = daily.sunset  || [];
+        for (let i = 0; i < daily.time.length; i++) {
+            const sr = dSunrise[i] ? Date.parse(dSunrise[i] + 'Z') : null;
+            const ss = dSunset[i]  ? Date.parse(dSunset[i]  + 'Z') : null;
+            if (sr) {
+                const key = ptDateStr(sr);
+                sunByDate[key] = sunByDate[key] || {};
+                sunByDate[key].sunrise = sr;
+            }
+            if (ss) {
+                const key = ptDateStr(ss);
+                sunByDate[key] = sunByDate[key] || {};
+                sunByDate[key].sunset = ss;
+            }
+        }
+    }
+
+    return {
+        timestamps: idx.map(i => allTs[i]),
+        windSpeed:  idx.map(i => allWind[i]),
+        windDir:    idx.map(i => allDir[i]),
+        gusts:      idx.map(i => allGust[i]),
+        // Store °C + 273.15 so kToC() in the render code produces the right °C again.
+        temp:       idx.map(i => (allTemp[i] ?? 0) + 273.15),
+        precip:     idx.map(i => allPrcp[i]  ?? 0),
+        rh:         idx.map(i => allRh[i]    ?? 0),
+        cloud:      idx.map(i => allCloud[i] ?? null),   // % cloud cover 0–100
+        wcode:      idx.map(i => allWcode[i] ?? null),   // WMO weather code
+        pressure:   idx.map(i => allPress[i] != null ? Math.round(allPress[i] * 0.750062) : null),  // mmHg MSL
+        cloud_base: idx.map(i => allCbase[i] ?? null),   // ft AGL (LCL estimate)
+        uv_index:   new Array(idx.length).fill(null),   // filled by mergeUVOnly()
+        sunByDate:  sunByDate                             // { 'YYYY-MM-DD': { sunrise, sunset } }
+    };
+}
+
+// ── Local ECMWF file loader ───────────────────────────────────────────────────
+// Approximate sunrise and sunset (UTC ms) for a given date and lat/lon using
+// the NOAA solar calculator algorithm (accurate to ~5 min for mid-latitudes).
+// Returns { sunrise, sunset } or { sunrise: null, sunset: null } on failure.
+function approxSunTimes(lat, lon, dateStr) {
+    try {
+        const [y, m, d] = dateStr.split('-').map(Number);
+        const R = Math.PI / 180;
+        // Julian Day Number (noon)
+        const a  = Math.floor((14 - m) / 12);
+        const yr = y + 4800 - a, mo = m + 12*a - 3;
+        const JD = d + Math.floor((153*mo+2)/5) + 365*yr + Math.floor(yr/4) - Math.floor(yr/100) + Math.floor(yr/400) - 32045 + 0.5;
+        const T  = (JD - 2451545.0) / 36525.0;
+        // Sun's position
+        const L0  = ((280.46646 + T*(36000.76983 + T*0.0003032)) % 360 + 360) % 360;
+        const M   = 357.52911 + T*(35999.05029 - 0.0001537*T);
+        const e   = 0.016708634 - T*(0.000042037 + 0.0000001267*T);
+        const Mr  = M * R;
+        const C   = (1.914602 - T*(0.004817 + 0.000014*T))*Math.sin(Mr) +
+                    (0.019993 - 0.000101*T)*Math.sin(2*Mr) + 0.000289*Math.sin(3*Mr);
+        const om  = 125.04 - 1934.136*T;
+        const lam = L0 + C - 0.00569 - 0.00478*Math.sin(om*R);
+        const e0  = 23.0 + (26.0 + (21.448 - T*(46.815 + T*(0.00059 - T*0.001813)))/60)/60;
+        const eps = e0 + 0.00256*Math.cos(om*R);
+        const sinDec = Math.sin(eps*R) * Math.sin(lam*R);
+        const dec    = Math.asin(sinDec);
+        // Equation of time (minutes)
+        const yS  = Math.tan(eps*R/2) ** 2;
+        const EqT = 4 * (yS*Math.sin(2*L0*R) - 2*e*Math.sin(Mr) +
+                         4*e*yS*Math.sin(Mr)*Math.cos(2*L0*R) -
+                         0.5*yS**2*Math.sin(4*L0*R) - 1.25*e**2*Math.sin(2*Mr)) * (180/Math.PI);
+        // Hour angle at horizon (zenith = 90°50')
+        const cosHA = (Math.cos(90.833*R) - sinDec*Math.sin(lat*R)) / (Math.cos(lat*R)*Math.cos(dec));
+        if (Math.abs(cosHA) > 1) return { sunrise: null, sunset: null };
+        const HA = Math.acos(cosHA) * (180/Math.PI);
+        // Solar noon in UTC minutes, then offset ±HA
+        const noon = 720 - 4*lon - EqT;
+        const srMin = noon - 4*HA, ssMin = noon + 4*HA;
+        return {
+            sunrise: Date.UTC(y, m-1, d) + srMin * 60000,
+            sunset:  Date.UTC(y, m-1, d) + ssMin * 60000
+        };
+    } catch (e) {
+        return { sunrise: null, sunset: null };
+    }
+}
+
+// Converts one entry from window.FORECAST_DATA.locations into the same internal
+// shape that processData() returns, so all downstream rendering code works as-is.
+function processLocalData(entry) {
+    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [], pressure = [], rh = [], cloud_base = [], uv_index = [];
+    // PDT = UTC-7, PST = UTC-8. Detect from the generated timestamp if present,
+    // otherwise default to -7 (ECMWF task runs in summer/spring).
+    const tzOffset = 7; // hours behind UTC
+
+    // Build sunrise/sunset lookup for each forecast day so the sky strip renders
+    // moon glyphs for night hours (2 AM, 5 AM, late PM) rather than ☀ all day.
+    const sunByDate = {};
+    for (const day of (entry.forecast || [])) {
+        const sun = approxSunTimes(entry.lat, entry.lon, day.date);
+        if (sun.sunrise && sun.sunset) sunByDate[day.date] = sun;
+    }
+
+    for (const day of (entry.forecast || [])) {
+        const [yr, mo, dy] = day.date.split('-').map(Number);
+        const hours = day.hours_pdt || [];
+        for (let i = 0; i < hours.length; i++) {
+            const m = hours[i].match(/^(\d{1,2})(AM|PM)$/i);
+            if (!m) continue;
+            let h = parseInt(m[1]);
+            const ampm = m[2].toUpperCase();
+            if (ampm === 'PM' && h !== 12) h += 12;
+            if (ampm === 'AM' && h === 12) h = 0;
+            // Convert local PT hour → UTC
+            const utcH = h + tzOffset;
+            timestamps.push(Date.UTC(yr, mo - 1, dy + Math.floor(utcH / 24), utcH % 24));
+            // Store as Kelvin-style (°C + 273.15) so kToC() in the render code works unchanged
+            temp.push(((day.temp_c  || [])[i] ?? 0) + 273.15);
+            windSpeed.push((day.wind_ms   || [])[i] ?? 0);
+            windDir.push((day.wind_dir    || [])[i] ?? 0);
+            gusts.push((day.gusts_ms     || [])[i] ?? 0);
+            precip.push((day.rain_mm     || [])[i] ?? 0);
+            // Sky conditions — derived from Windy ECMWF pictocodes converted to
+            // WMO codes + cloud-cover % so weatherGlyph() and cloudBg() work as-is.
+            cloud.push((day.cloud_pct      || [])[i] ?? null);
+            wcode.push((day.wmo_code       || [])[i] ?? null);
+            // Archive-seeded supplementary fields. The scheduled task writes
+            // these into forecast-data.js using Open-Meteo `best_match` with
+            // past_days=5, so historical days have proper reanalysis values.
+            // mergeSupplementary() will fill any null slots from the live
+            // supp fetch (past_days=1), so today/forward still gets the
+            // freshest values while history is preserved.
+            pressure.push((day.pressure_mmhg  || [])[i] ?? null);
+            rh.push((day.rh_pct               || [])[i] ?? null);
+            cloud_base.push((day.cloud_base_ft|| [])[i] ?? null);
+            uv_index.push((day.uv_index       || [])[i] ?? null);
+        }
+    }
+    return {
+        timestamps, windSpeed, windDir, gusts, temp, precip,
+        // All 6 supplementary fields are seeded from forecast-data.js when
+        // available. mergeSupplementary fills only the slots the archive
+        // couldn't cover (e.g. brand-new days before the next scrape run).
+        rh,
+        cloud,
+        wcode,
+        pressure,
+        cloud_base,
+        uv_index,
+        sunByDate,
+        _source:    'local-ecmwf'
+    };
+}
+
+// Update the model/source subtitle in the header for the first location.
+function updateSourceBadge(loc) {
+    if (!loc || loc.id !== locations[0].id) return;
+    const fd = window.FORECAST_DATA;
+    if (!fd) return;
+    const d = fd.generated ? new Date(fd.generated) : null;
+    const when = d
+        ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit' })
+        : 'local file';
+    document.getElementById('model-ref').textContent =
+        `Source: ECMWF via JSONBin · Updated ${when}`;
+}
+
+// Render the stale / missing-data empty state into a location card.
+// ageDays === Infinity means no forecast-data.js file was found at all.
+function showStaleState(loc, ageDays) {
+    const body = document.getElementById(`body-${loc.id}`);
+    if (!body) return;
+    const missing  = !isFinite(ageDays);
+    const daysText = missing ? 'No forecast file found'
+                             : `Last update: ${Math.floor(ageDays)} day${Math.floor(ageDays) !== 1 ? 's' : ''} ago`;
+    body.innerHTML = `
+        <div class="stale-state">
+            <div class="stale-icon">⏱</div>
+            <div class="stale-msg">Run the parsing, data is outdated.</div>
+            <div class="stale-sub">${daysText}</div>
+        </div>`;
+    // Update header badge once (only for the first card)
+    if (loc.id === locations[0].id) {
+        document.getElementById('model-ref').textContent =
+            missing ? 'No local forecast file — run the scheduled task'
+                    : `Local data is ${Math.floor(ageDays)}d old — run the scheduled task to refresh`;
+    }
+}
+
+// ── Render helpers ────────────────────────────────────────────────────────────
+// Continuous color-temperature scale: deep indigo → blue → cyan → pale yellow
+// → amber → orange → red → crimson. Anchored so ~30°C reads as orange (the
+// user's reference). Linearly interpolates between stops in RGB space so the
+// per-segment gradients on the temp line glide smoothly through the spectrum.
+const TEMP_COLOR_STOPS = [
+    { t: -15, c: [ 67,  56, 202] },   // deep indigo
+    { t:  -5, c: [ 59, 130, 246] },   // blue
+    { t:   5, c: [ 56, 189, 248] },   // sky
+    { t:  12, c: [125, 211, 252] },   // light sky
+    { t:  18, c: [253, 224,  71] },   // pale yellow (transition)
+    { t:  25, c: [245, 158,  11] },   // amber
+    { t:  30, c: [249, 115,  22] },   // orange ← user's reference
+    { t:  36, c: [239,  68,  68] },   // red
+    { t:  42, c: [153,  27,  27] }    // deep crimson
+];
+function tempColor(c) {
+    if (c == null || isNaN(c)) return '#94a3b8';
+    const stops = TEMP_COLOR_STOPS;
+    if (c <= stops[0].t)              return `rgb(${stops[0].c.join(',')})`;
+    if (c >= stops[stops.length-1].t) return `rgb(${stops[stops.length-1].c.join(',')})`;
+    for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1];
+        if (c >= a.t && c <= b.t) {
+            const f = (c - a.t) / (b.t - a.t);
+            const r  = Math.round(a.c[0] + (b.c[0] - a.c[0]) * f);
+            const g  = Math.round(a.c[1] + (b.c[1] - a.c[1]) * f);
+            const bl = Math.round(a.c[2] + (b.c[2] - a.c[2]) * f);
+            return `rgb(${r},${g},${bl})`;
+        }
+    }
+    return '#94a3b8';
+}
+// Wind / gust color bands (m/s):
+//   0–3   light blue (calm, matches cold-temp sky)
+//   3–6   green      (ideal for bass/trout topwater)
+//   6–8   yellow     (breezy)
+//   8–11  orange     (blowy, choppy surface)
+//   11–14 red        (small-craft advisory territory)
+//   14+   purple     (dangerous / stay ashore)
+function windColor(ms) {
+    if (ms == null || isNaN(ms)) return '#94a3b8';
+    return ms >= 14 ? '#a855f7'
+         : ms >= 11 ? '#ef4444'
+         : ms >= 8  ? '#f97316'
+         : ms >= 6  ? '#facc15'
+         : ms >= 3  ? '#4ade80'
+         :            '#7dd3fc';
+}
+
+// RGB variants of the color functions — used by makeGradientFillPlugin() to
+// build canvas gradients with arbitrary alpha values.
+function tempColorRgb(c) {
+    if (c == null || isNaN(c)) return [148, 163, 184];
+    const stops = TEMP_COLOR_STOPS;
+    if (c <= stops[0].t) return stops[0].c.slice();
+    if (c >= stops[stops.length-1].t) return stops[stops.length-1].c.slice();
+    for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1];
+        if (c >= a.t && c <= b.t) {
+            const f = (c - a.t) / (b.t - a.t);
+            return [
+                Math.round(a.c[0] + (b.c[0] - a.c[0]) * f),
+                Math.round(a.c[1] + (b.c[1] - a.c[1]) * f),
+                Math.round(a.c[2] + (b.c[2] - a.c[2]) * f)
+            ];
+        }
+    }
+    return [148, 163, 184];
+}
+function windColorRgb(ms) {
+    if (ms == null || isNaN(ms)) return [148, 163, 184];
+    if (ms >= 14) return [168,  85, 247];
+    if (ms >= 11) return [239,  68,  68];
+    if (ms >= 8)  return [249, 115,  22];
+    if (ms >= 6)  return [250, 204,  21];
+    if (ms >= 3)  return [ 74, 222, 128];
+    return [125, 211, 252];
+}
+
+// Creates a Chart.js inline plugin that draws a filled area whose colour
+// follows the line's own colour scale (horizontal gradient keyed to data
+// values) AND fades to transparent at the baseline (vertical fade via an
+// offscreen canvas + destination-out pass). The plugin fires before Chart.js
+// draws the dataset, so the fill lands underneath the line.
+//
+// opts:
+//   colorFn  — function(value) → [r, g, b]
+//   dsIndex  — which dataset index to fill (default 0)
+//   topAlpha — max fill opacity at the top of the chart area (default 0.35)
+// Replicates Chart.js's cardinal spline formula (tension parameter matches
+// the dataset's `tension: 0.45`) so the fill path aligns exactly with the
+// rendered line. Returns one {cp1, cp2} object per point; cp2 is the control
+// point leaving point i toward i+1, cp1 is the one entering point i from i-1.
+function _splineCPs(pts, tension) {
+    return pts.map((curr, i) => {
+        const prev = pts[Math.max(0, i - 1)];
+        const next = pts[Math.min(pts.length - 1, i + 1)];
+        const d01  = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+        const d12  = Math.hypot(next.x - curr.x,  next.y - curr.y);
+        const sum  = d01 + d12 || 1;
+        const fa   = tension * (d01 / sum);   // weight toward prev
+        const fb   = tension * (d12 / sum);   // weight toward next
+        return {
+            cp1: { x: curr.x - fa * (next.x - prev.x),  y: curr.y - fa * (next.y - prev.y) },
+            cp2: { x: curr.x + fb * (next.x - prev.x),  y: curr.y + fb * (next.y - prev.y) }
+        };
+    });
+}
+
+function makeGradientFillPlugin({ colorFn, dsIndex = 0, topAlpha = 0.35 } = {}) {
+    return {
+        id: `gradientFill_${dsIndex}`,
+        beforeDatasetsDraw(chart) {
+            const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+            const meta = chart.getDatasetMeta(dsIndex);
+            if (!meta || !meta.data || !meta.data.length) return;
+
+            const vals     = chart.data.datasets[dsIndex].data;
+            const pts      = meta.data;
+            const baseline = Math.min(y.getPixelForValue(0), bottom);
+
+            const W = Math.round(right - left);
+            const H = Math.round(baseline - top);
+            if (W <= 0 || H <= 0) return;
+
+            // Self-computed control points — no dependency on Chart.js internals.
+            // Must use absolute canvas coords here; we subtract `left`/`top`
+            // only when writing to the offscreen canvas below.
+            const cps = _splineCPs(pts.map(p => ({ x: p.x, y: p.y })), 0.45);
+
+            // ── Offscreen canvas (isolated compositing) ───────────────────
+            // The offscreen origin is (left, top) in main-canvas space.
+            // No clamping on y — bezier control points can legitimately sit
+            // above the canvas top; the canvas clips them automatically.
+            const off    = document.createElement('canvas');
+            off.width    = W;
+            off.height   = H;
+            const offCtx = off.getContext('2d');
+
+            const ox = left, oy = top;  // offscreen origin in main-canvas coords
+
+            offCtx.beginPath();
+            offCtx.moveTo(pts[0].x - ox, H);          // baseline under first point
+            offCtx.lineTo(pts[0].x - ox, pts[0].y - oy);
+
+            for (let i = 1; i < pts.length; i++) {
+                if (pts[i].skip) {
+                    offCtx.lineTo(pts[i].x - ox, H);
+                    offCtx.lineTo(pts[i].x - ox, pts[i].y - oy);
+                    continue;
+                }
+                offCtx.bezierCurveTo(
+                    cps[i - 1].cp2.x - ox, cps[i - 1].cp2.y - oy,  // exit prev
+                    cps[i    ].cp1.x - ox, cps[i    ].cp1.y - oy,   // enter curr
+                    pts[i].x - ox,          pts[i].y - oy
+                );
+            }
+
+            offCtx.lineTo(pts[pts.length - 1].x - ox, H);
+            offCtx.closePath();
+            offCtx.clip();
+
+            // Horizontal gradient: colour stops keyed to each data value's x pos
+            const hGrad = offCtx.createLinearGradient(0, 0, W, 0);
+            pts.forEach((pt, i) => {
+                if (pt.skip || vals[i] == null) return;
+                const t = Math.max(0, Math.min(1, (pt.x - ox) / W));
+                const [r, g, b] = colorFn(vals[i]);
+                hGrad.addColorStop(t, `rgba(${r},${g},${b},${topAlpha})`);
+            });
+            offCtx.fillStyle = hGrad;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Vertical fade via destination-out (only affects offscreen pixels)
+            offCtx.globalCompositeOperation = 'destination-out';
+            const vFade = offCtx.createLinearGradient(0, 0, 0, H);
+            vFade.addColorStop(0,    'rgba(0,0,0,0)');
+            vFade.addColorStop(0.45, 'rgba(0,0,0,0.1)');
+            vFade.addColorStop(1,    'rgba(0,0,0,0.86)');
+            offCtx.fillStyle = vFade;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Stamp onto main canvas — sits under the line drawn by Chart.js
+            ctx.drawImage(off, ox, oy);
+        }
+    };
+}
+
+// Wind-specific fill plugin: fills under whichever of the two datasets
+// (wind = ds 0, gusts = ds 1) is higher at each point. The lower line
+// stays as a plain stroke — no double fill, clean separation.
+function makeWindMaxFillPlugin({ colorFn, topAlpha = 0.35 } = {}) {
+    return {
+        id: 'windMaxFill',
+        beforeDatasetsDraw(chart) {
+            const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+            const m0 = chart.getDatasetMeta(0);  // wind
+            const m1 = chart.getDatasetMeta(1);  // gusts
+            if (!m0?.data?.length || !m1?.data?.length) return;
+
+            const windVals = chart.data.datasets[0].data;
+            const gustVals = chart.data.datasets[1].data;
+            const len      = Math.min(m0.data.length, m1.data.length);
+
+            // At each index, take the point that sits higher on screen (lower y px)
+            const upperPts  = [];
+            const upperVals = [];
+            for (let i = 0; i < len; i++) {
+                const wp = m0.data[i], gp = m1.data[i];
+                const useGust = gp.y < wp.y;   // smaller y = higher on screen
+                upperPts.push(useGust ? gp : wp);
+                upperVals.push(useGust ? gustVals[i] : windVals[i]);
+            }
+
+            const baseline = Math.min(y.getPixelForValue(0), bottom);
+            const W = Math.round(right - left);
+            const H = Math.round(baseline - top);
+            if (W <= 0 || H <= 0) return;
+
+            // Smooth bezier control points for the max-envelope path
+            const cps = _splineCPs(upperPts.map(p => ({ x: p.x, y: p.y })), 0.45);
+
+            const off    = document.createElement('canvas');
+            off.width    = W;
+            off.height   = H;
+            const offCtx = off.getContext('2d');
+            const ox = left, oy = top;
+
+            offCtx.beginPath();
+            offCtx.moveTo(upperPts[0].x - ox, H);
+            offCtx.lineTo(upperPts[0].x - ox, upperPts[0].y - oy);
+            for (let i = 1; i < upperPts.length; i++) {
+                if (upperPts[i].skip) continue;
+                offCtx.bezierCurveTo(
+                    cps[i-1].cp2.x - ox, cps[i-1].cp2.y - oy,
+                    cps[i  ].cp1.x - ox, cps[i  ].cp1.y - oy,
+                    upperPts[i].x  - ox, upperPts[i].y  - oy
+                );
+            }
+            offCtx.lineTo(upperPts[upperPts.length - 1].x - ox, H);
+            offCtx.closePath();
+            offCtx.clip();
+
+            // Horizontal gradient keyed to whichever value was higher
+            const hGrad = offCtx.createLinearGradient(0, 0, W, 0);
+            upperPts.forEach((pt, i) => {
+                if (upperVals[i] == null) return;
+                const t = Math.max(0, Math.min(1, (pt.x - ox) / W));
+                const [r, g, b] = colorFn(upperVals[i]);
+                hGrad.addColorStop(t, `rgba(${r},${g},${b},${topAlpha})`);
+            });
+            offCtx.fillStyle = hGrad;
+            offCtx.fillRect(0, 0, W, H);
+
+            // Vertical fade
+            offCtx.globalCompositeOperation = 'destination-out';
+            const vFade = offCtx.createLinearGradient(0, 0, 0, H);
+            vFade.addColorStop(0,    'rgba(0,0,0,0)');
+            vFade.addColorStop(0.45, 'rgba(0,0,0,0.1)');
+            vFade.addColorStop(1,    'rgba(0,0,0,0.86)');
+            offCtx.fillStyle = vFade;
+            offCtx.fillRect(0, 0, W, H);
+
+            ctx.drawImage(off, ox, oy);
+        }
+    };
+}
+
+// Map a WMO weather code + cloud-cover percentage to a Unicode weather glyph.
+// WMO codes come from Open-Meteo and cover clear skies through thunderstorms.
+// When the weather_code is missing we fall back to cloud-cover-only glyphs.
+// If `isNight` is true, swap the sun glyph for a moon so post-sunset hours
+// don't look misleadingly sunny.
+function weatherGlyph(code, cloudPct, isNight = false) {
+    if (code != null) {
+        if (code === 0)  return isNight ? '🌙' : '☀';
+        if (code === 1)  return isNight ? '🌙' : '🌤';
+        if (code === 2)  return isNight ? '☁' : '⛅';
+        if (code === 3)  return '☁';
+        if (code === 45 || code === 48) return '🌫';
+        if (code >= 51 && code <= 57)   return '🌦';
+        if (code >= 61 && code <= 67)   return '🌧';
+        if (code >= 71 && code <= 77)   return '🌨';
+        if (code >= 80 && code <= 82)   return '🌧';
+        if (code >= 85 && code <= 86)   return '🌨';
+        if (code >= 95)                 return '⛈';
+    }
+    if (cloudPct == null) return '';
+    if (cloudPct < 10) return isNight ? '🌙' : '☀';
+    if (cloudPct < 40) return isNight ? '🌙' : '🌤';
+    if (cloudPct < 75) return isNight ? '☁' : '⛅';
+    return '☁';
+}
+
+// Format a sunrise / sunset pair into the small pill row shown where the temp
+// chart legend used to sit. Returns an empty string when we don't have daily
+// data for the active day, so the header collapses cleanly.
+function renderSunInfo(sunrise, sunset) {
+    const fmt = (ts) => ts ? new Date(ts).toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles'
+    }) : '--';
+    if (!sunrise && !sunset) return '';
+    return `
+        <span class="sun-item sun-sunrise" title="Sunrise (local time)">
+            <span class="sun-icon">☀</span>${fmt(sunrise)}
+        </span>
+        <span class="sun-item sun-sunset" title="Sunset (local time)">
+            <span class="sun-icon">🌙</span>${fmt(sunset)}
+        </span>`;
+}
+
+// Background color for a cloud-cover cell — pale warm when sunny, shifting to
+// cool grays as cloudiness increases, so the strip reads like a sky gradient.
+function cloudBg(pct) {
+    if (pct == null) return '#152236';
+    if (pct < 15) return 'rgba(251, 191, 36, 0.28)';   // sunny — warm glow
+    if (pct < 35) return 'rgba(203, 213, 225, 0.18)';  // mostly clear
+    if (pct < 60) return 'rgba(148, 163, 184, 0.35)';  // partly cloudy
+    if (pct < 85) return 'rgba(100, 116, 139, 0.55)';  // mostly cloudy
+    return 'rgba(71, 85, 105, 0.85)';                  // overcast
+}
+
+function createCard(loc) {
+    const grid = document.getElementById('locations-grid');
+    const card = document.createElement('div');
+    card.className = 'location-card';
+    card.id = `card-${loc.id}`;
+    card.innerHTML = `
+        <div class="card-header">
+            <div>
+                <h3>${loc.name}<span class="cond-time card-time" data-loc-id="${loc.id}"></span></h3>
+                <div class="loc-label">${loc.label} &nbsp;·&nbsp; ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}</div>
+            </div>
+            <div class="view-switcher" data-loc-id="${loc.id}">
+                <button class="view-btn ${activeCardView === 'data' ? 'active' : ''}" id="view-data-${loc.id}" onclick="setView('data')" title="Forecast data, peek tiles, charts">Data</button>
+                <button class="view-btn ${activeCardView === 'insights' ? 'active' : ''}" id="view-insights-${loc.id}" onclick="setView('insights')" title="Bass-relevant phase + 72h trajectory">Insights</button>
+            </div>
+            <div class="card-menu" data-loc-id="${loc.id}">
+                <button class="card-menu-btn" onclick="toggleCardMenu(${loc.id}, event)" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
+                <div class="card-menu-dropdown" id="card-menu-${loc.id}" role="menu">
+                    <button class="card-menu-item" role="menuitem" onclick="debugDump(${loc.id}); closeCardMenus()"><span class="menu-icon">🔍</span>Debug (dump to console)</button>
+                    <button class="card-menu-item danger" role="menuitem" onclick="closeCardMenus(); removeLocation(${loc.id})"><span class="menu-icon">✕</span>Remove location</button>
+                </div>
+            </div>
+        </div>
+        <div id="body-${loc.id}">
+            <div class="loading-state"><div class="spinner"></div><span style="font-size:13px">Loading…</span></div>
+        </div>`;
+    grid.appendChild(card);
+}
+
+function populateCard(loc, rawD) {
+    const body = document.getElementById(`body-${loc.id}`);
+    if (!body) return;
+
+    // Insights view is GLOBAL across cards. It reads the FULL unfiltered
+    // series (rawD) because the phase classifier needs ~72h of backward
+    // context — not the PT-day slice that the Data view shows. We branch
+    // early so the Data rendering path is untouched.
+    if (activeCardView === 'insights') {
+        body.innerHTML = renderInsightsView(loc, rawD);
+        return;
+    }
+
+    const d = filterByPeriod(rawD, activePeriod);
+    if (!d) {
+        delete filteredDataCache[loc.id];
+        body.innerHTML = `<div class="no-data-msg">No forecast data available for this period yet.<br>Try a closer date or check back soon.</div>`;
+        return;
+    }
+    filteredDataCache[loc.id] = d;
+
+    // Forecast peek strip — stretches edge-to-edge across the card, one tile per
+    // 3h step. Hovering a tile updates the header to match that hour. The
+    // "default" highlighted tile targets 2 PM PT (the midday step) since that
+    // answers the common "what's it going to feel like this afternoon?" case.
+    const defaultIdx = defaultIndex(d);
+    let peekHTML = '';
+    const peekCount = Math.min(8, d.timestamps.length);
+    for (let i = 0; i < peekCount; i++) {
+        const tF_i = parseFloat(kToC(d.temp[i]));
+        const w_i  = parseFloat(msToMs(d.windSpeed[i]));
+        peekHTML += `<div class="peek-item${i === defaultIdx ? ' active' : ''}" data-idx="${i}"
+            onmouseenter="syncHover(${loc.id}, ${i})"
+            onmouseleave="resetHoverAll()">
+            <div class="peek-time">${fmtHour(d.timestamps[i])}</div>
+            <div class="peek-temp" style="color:${tempColor(tF_i)}">${tF_i}°</div>
+            <div class="peek-wind">${w_i} m/s</div>
+        </div>`;
+    }
+
+    body.innerHTML = `
+        <div class="current-conditions" data-loc-id="${loc.id}">
+            <div class="cond-item">
+                <div class="cond-label">Temperature</div>
+                <div class="cond-value cc-temp"></div>
+                <div class="cond-sub cc-temp-sub">&nbsp;</div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Wind</div>
+                <div class="cond-value cc-wind"></div>
+                <div class="cond-sub cc-wind-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Direction</div>
+                <div class="cond-value cc-dir"></div>
+                <div class="cond-sub cc-dir-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Precip / Humidity</div>
+                <div class="cond-value cc-precip"></div>
+                <div class="cond-sub cc-precip-sub"></div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Pressure</div>
+                <div class="cond-value cc-pressure"></div>
+                <div class="cond-sub cc-pressure-sub">mmHg</div>
+            </div>
+            <div class="cond-item">
+                <div class="cond-label">Cloud Base</div>
+                <div class="cond-value cc-cbase"></div>
+                <div class="cond-sub cc-cbase-sub">AGL</div>
+            </div>
+        </div>
+        <div class="forecast-peek">${peekHTML}</div>
+        <div class="chart-area">
+            <div class="chart-header">
+                <div class="chart-tabs">
+                    <button class="chart-tab ${activeChartTab === 'temp' ? 'active' : ''}" data-tab-type="temp"
+                            onclick="switchTab(${loc.id},'temp',this)">🌡 Temp &amp; Rain</button>
+                    <button class="chart-tab ${activeChartTab === 'wind' ? 'active' : ''}" data-tab-type="wind"
+                            onclick="switchTab(${loc.id},'wind',this)">💨 Wind &amp; Gusts</button>
+                </div>
+                <div class="sun-info" id="sun-info-${loc.id}">${renderSunInfo(d.sunrise, d.sunset)}</div>
+            </div>
+            <div class="chart-wrapper"><canvas id="chart-${loc.id}"></canvas></div>
+        </div>`;
+
+    drawChart(loc.id, activeChartTab, d);
+    // Seed the header with the midday-default values.
+    updateCurrentConditions(loc.id, defaultIdx);
+
+    // When the mouse leaves the chart canvas, snap every card back to its
+    // own "now" (first visible hour) so they all stay in sync.
+    const canvas = document.getElementById(`chart-${loc.id}`);
+    if (canvas) {
+        canvas.addEventListener('mouseleave', () => resetHoverAll());
+    }
+}
+
+// Given a timestamp, find the index in this location's filtered data whose
+// timestamp is closest to it. Returns -1 if the location has no data loaded.
+function closestIndexForTs(locId, ts) {
+    const d = filteredDataCache[locId];
+    if (!d || !d.timestamps || !d.timestamps.length) return -1;
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const diff = Math.abs(d.timestamps[i] - ts);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+// Sync hover state across every location card. The user hovered `sourceIndex`
+// in `sourceLocId`'s chart/peek — find the equivalent hour in each other card
+// and update it too. This is the entry point for chart/peek hover handlers.
+function syncHover(sourceLocId, sourceIndex) {
+    const src = filteredDataCache[sourceLocId];
+    if (!src || !src.timestamps || sourceIndex < 0 || sourceIndex >= src.timestamps.length) return;
+    const ts = src.timestamps[sourceIndex];
+    locations.forEach(loc => {
+        if (loc.id === sourceLocId) {
+            updateCurrentConditions(loc.id, sourceIndex);
+        } else {
+            const idx = closestIndexForTs(loc.id, ts);
+            if (idx >= 0) updateCurrentConditions(loc.id, idx);
+        }
+    });
+}
+
+// Pick a "default" step to highlight when nothing is hovered.
+//   • On today's view → the step closest to the current wall-clock time, so
+//     the card immediately shows "what's it doing right now".
+//   • On any future day → the 2 PM PT step, which is what most people care
+//     about when planning an outdoor outing.
+function defaultIndex(d) {
+    if (!d || !d.timestamps || !d.timestamps.length) return 0;
+
+    // If the day being shown is today (PT), snap to the step nearest to now.
+    const todayStr = ptDateStr(Date.now());
+    const isToday  = d.timestamps.length && ptDateStr(d.timestamps[0]) === todayStr;
+    if (isToday) {
+        const now = Date.now();
+        let best = 0, bestDiff = Infinity;
+        for (let i = 0; i < d.timestamps.length; i++) {
+            const diff = Math.abs(d.timestamps[i] - now);
+            if (diff < bestDiff) { bestDiff = diff; best = i; }
+        }
+        return best;
+    }
+
+    // Otherwise: target 2 PM PT (midday) on the chosen day.
+    let best = 0, bestDiff = Infinity;
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const hourStr = new Date(d.timestamps[i]).toLocaleString('en-US', {
+            timeZone: PT, hour: 'numeric', hour12: false
+        });
+        const ptHour = parseInt(hourStr, 10) % 24;     // "24" → 0 in some engines
+        const diff   = Math.abs(ptHour - 14);
+        if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+}
+
+// Reset every card's header back to its own default ("midday") step. Used
+// when the cursor leaves a chart/peek so all cards return together.
+function resetHoverAll() {
+    locations.forEach(loc => {
+        const d = filteredDataCache[loc.id];
+        if (d) updateCurrentConditions(loc.id, defaultIndex(d));
+    });
+}
+
+// Refresh the four header cells (Temp / Wind / Direction / Precip) with the
+// values at `index` in the currently filtered data for this location. Also
+// highlights the matching peek tile and shows the hour as a small badge.
+function updateCurrentConditions(locId, index) {
+    const d = filteredDataCache[locId];
+    if (!d || !d.timestamps || index < 0 || index >= d.timestamps.length) return;
+
+    const tF   = parseFloat(kToC(d.temp[index]));
+    const wMs  = parseFloat(msToMs(d.windSpeed[index]));
+    const gMs  = parseFloat(msToMs(d.gusts[index]));
+    const dir  = d.windDir[index];
+    const cmp  = degToCompass(dir);
+    const prcp = d.precip[index].toFixed(1);
+    const rh   = d.rh[index] ? d.rh[index].toFixed(0) : '--';
+    const when = fmtHour(d.timestamps[index]);
+    // "Now" makes sense only when we're looking at today AND at the 3h step
+    // closest to the current wall-clock time (defaultIndex on today snaps to
+    // the current hour). On any other day, we always show the formatted hour.
+    const todayStr = ptDateStr(Date.now());
+    const isNow    = activePeriod === todayStr && index === defaultIndex(d);
+
+    const cc = document.querySelector(`.current-conditions[data-loc-id="${locId}"]`);
+    if (!cc) return;
+
+    // Single time badge in the card header (avoids layout shift in the metrics row).
+    const badge = document.querySelector(`.card-time[data-loc-id="${locId}"]`);
+    if (badge) badge.textContent = isNow ? 'Now' : when;
+
+    const tEl = cc.querySelector('.cc-temp');
+    if (tEl) { tEl.textContent = `${tF}°C`; tEl.style.color = tempColor(tF); }
+    const tSub = cc.querySelector('.cc-temp-sub');
+    if (tSub) {
+        // Mirror the Gusts treatment: muted line with the colored value pop.
+        // tempColor() takes °C, so feed it tF (the °C value) for a matching hue.
+        const tFahr = (tF * 9 / 5 + 32).toFixed(1);
+        tSub.innerHTML = `<strong style="color:${tempColor(tF)};font-weight:700">${tFahr}°F</strong>`;
+    }
+
+    const wEl = cc.querySelector('.cc-wind');
+    if (wEl) {
+        wEl.innerHTML = `${wMs} <span style="font-size:14px;font-weight:400">m/s</span>`;
+        wEl.style.color = windColor(wMs);
+    }
+    const wSub = cc.querySelector('.cc-wind-sub');
+    if (wSub) {
+        // Color the gust value with the same scale as wind — pops against the
+        // muted sub-label and makes it easy to scan at a glance.
+        wSub.innerHTML = `Gusts <strong style="color:${windColor(gMs)};font-weight:700">${gMs} m/s</strong>`;
+    }
+
+    const dEl = cc.querySelector('.cc-dir');
+    if (dEl) {
+        dEl.innerHTML = `<span class="wind-arrow" style="display:inline-block;transform:rotate(${(dir + 180) % 360}deg)">↑</span>`;
+    }
+    const dSub = cc.querySelector('.cc-dir-sub');
+    if (dSub) dSub.innerHTML = `${cmp} &nbsp;${Math.round(dir)}°`;
+
+    const pEl = cc.querySelector('.cc-precip');
+    if (pEl) pEl.innerHTML = `${prcp} <span style="font-size:12px;font-weight:400">mm</span>`;
+    const pSub = cc.querySelector('.cc-precip-sub');
+    if (pSub) pSub.innerHTML = `💧 ${rh}% RH`;
+
+    // Pressure
+    const pressVal = (d.pressure && d.pressure[index] != null) ? Math.round(d.pressure[index]) : null;
+    const pressEl  = cc.querySelector('.cc-pressure');
+    if (pressEl) pressEl.textContent = pressVal != null ? pressVal : '--';
+    const pressSub = cc.querySelector('.cc-pressure-sub');
+    if (pressSub) pressSub.textContent = 'mmHg';
+
+    // Cloud base
+    const cbaseVal = (d.cloud_base && d.cloud_base[index] != null) ? d.cloud_base[index] : null;
+    const cbaseEl  = cc.querySelector('.cc-cbase');
+    const cbaseFmt = fmtCloudBase(cbaseVal);
+    if (cbaseEl) cbaseEl.textContent = cbaseFmt ?? '--';
+    const cbaseSub = cc.querySelector('.cc-cbase-sub');
+    if (cbaseSub) cbaseSub.textContent = cbaseFmt != null ? 'AGL' : '—';
+
+    // Peek tile highlight — only highlight a matching tile if one exists
+    // (we only render the first 8 peek items, but the chart can have more).
+    const peek = cc.parentElement && cc.parentElement.querySelector('.forecast-peek');
+    if (peek) {
+        peek.querySelectorAll('.peek-item').forEach(el => {
+            el.classList.toggle('active', Number(el.dataset.idx) === index);
+        });
+    }
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+// Map precipitation mm → background color. Because the strip cells share a
+// fixed height, intensity is communicated purely through color saturation.
+function precipColor(mm) {
+    if (mm < 0.05) return '#0c1520';                    // effectively no rain — matches card background
+    if (mm < 0.3)  return 'rgba(56,130,248,0.18)';      // trace
+    if (mm < 1)    return 'rgba(56,130,248,0.35)';      // light
+    if (mm < 3)    return 'rgba(56,130,248,0.55)';      // moderate
+    if (mm < 6)    return 'rgba(56,130,248,0.75)';      // heavy
+    if (mm < 12)   return 'rgba(37,99,235,0.92)';       // very heavy
+    return 'rgba(29,78,216,1.0)';                        // extreme
+}
+
+// Text-color helpers for cells that carry a numeric intensity (precip / wind).
+// Anything saturated enough to read white text, otherwise a dim value color.
+function cellTextForPrecip(mm) {
+    return mm >= 1.5 ? '#ffffff' : mm > 0.05 ? '#cfe7ff' : '#3a6a8a';
+}
+function cellTextForWind(ms) {
+    if (ms == null || isNaN(ms)) return '#e0eaf4';
+    if (ms >= 14) return '#ffffff';      // purple  → white
+    if (ms >= 11) return '#ffffff';      // red     → white
+    if (ms >= 8)  return '#ffffff';      // orange  → white
+    if (ms >= 6)  return '#1f1400';      // yellow  → dark (contrast)
+    if (ms >= 3)  return '#0b2b12';      // green   → dark
+    return '#0a2230';                    // light blue / calm → dark
+}
+
+// Map relative humidity % → background color. Dry air reads warm amber,
+// comfortable mid-range is a muted teal, humid shifts toward saturated blue
+// so the strip echoes the usual "dry → humid" rainfall palette without
+// clashing with the precip row just above it.
+function humidityColor(rh) {
+    if (rh == null || isNaN(rh)) return '#0c1520';
+    if (rh < 25) return 'rgba(245, 158, 11, 0.35)';    // very dry
+    if (rh < 40) return 'rgba(234, 179,  8, 0.22)';    // dry
+    if (rh < 55) return 'rgba(100, 116, 139, 0.22)';   // comfortable
+    if (rh < 70) return 'rgba(56,  189, 248, 0.25)';   // slightly humid
+    if (rh < 85) return 'rgba(56,  189, 248, 0.45)';   // humid
+    return 'rgba(37,   99, 235, 0.65)';                // saturated
+}
+function cellTextForHumidity(rh) {
+    if (rh == null || isNaN(rh)) return '#3a6a8a';
+    if (rh >= 85) return '#ffffff';
+    if (rh >= 55) return '#cfe7ff';
+    if (rh >= 25) return '#d0d6de';
+    return '#3a2d10';                     // warm dark text on the amber dry cell
+}
+
+// Convert hPa → mmHg (millimeters of mercury).  1 hPa = 0.750062 mmHg.
+function hPaToMmHg(hpa) {
+    if (hpa == null) return null;
+    return Math.round(hpa * 0.750062);
+}
+
+// Pressure strip — three zones matching meteorological convention:
+//   Low  < 750 mmHg (< 1000 hPa): Red   — unsettled / frontal / stormy  (maps show "L" in red)
+//   Normal 750–768 mmHg (1000–1024 hPa): neutral steel
+//   High > 768 mmHg (> 1024 hPa): Blue  — settled / fair weather        (maps show "H" in blue)
+function pressureColor(mmhg) {
+    if (mmhg == null || isNaN(mmhg)) return '#0c1520';
+    if (mmhg < 750) return 'rgba(239, 68, 68, 0.50)';     // low  — red
+    if (mmhg <= 768) return 'rgba(100, 116, 139, 0.25)';  // normal — steel
+    return 'rgba(56, 130, 248, 0.45)';                     // high — blue
+}
+function cellTextForPressure(mmhg) {
+    if (mmhg == null || isNaN(mmhg)) return '#3a6a8a';
+    if (mmhg < 750)  return '#ffc8c8';   // low  — pale red text
+    if (mmhg <= 768) return '#a0b8cc';   // normal — muted
+    return '#c8dfff';                    // high — pale blue text
+}
+
+// Cloud base ft → display string in km or m
+function fmtCloudBase(ft) {
+    if (ft == null) return null;
+    const m = Math.round(ft * 0.3048);
+    return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${m}m`;
+}
+
+// UV index color scale — WHO standard categories
+function uvColor(uv) {
+    if (uv == null || isNaN(uv) || uv < 0.5) return '#0c1520';   // night / none
+    if (uv < 3)   return 'rgba( 74, 222, 128, 0.38)';   // low       0–2   green
+    if (uv < 6)   return 'rgba(234, 179,   8, 0.45)';   // moderate  3–5   yellow
+    if (uv < 8)   return 'rgba(249, 115,  22, 0.55)';   // high      6–7   orange
+    if (uv < 11)  return 'rgba(239,  68,  68, 0.60)';   // very high 8–10  red
+    return 'rgba(167,  81, 235, 0.65)';                  // extreme   11+   violet
+}
+function cellTextForUV(uv) {
+    if (uv == null || isNaN(uv) || uv < 0.5) return '#3a6a8a';
+    if (uv < 3)   return '#c8ffe0';
+    if (uv < 6)   return '#fff8c0';
+    if (uv < 8)   return '#ffe8c0';
+    if (uv < 11)  return '#ffd0d0';
+    return '#f0d0ff';
+}
+
+// Chart.js plugin: draws one or more rows of colored cells beneath the x-axis.
+// Every cell is pixel-aligned to the matching data point on the x scale, so
+// each row shares the exact same time axis as the line chart above.
+//
+// Options schema:
+//   { rows: [{
+//       data,                    // number[] same length as chart data
+//       color:   (v,i) => cssColor,
+//       label:   (v,i) => string,
+//       textColor: (v,i) => cssColor,
+//       axisLabel: string,       // rendered at left of row in y-axis gutter
+//       weight:    'bold'|'normal'  // optional — emphasize the row's axis label
+//   }, …] }
+const dataStripPlugin = {
+    id: 'dataStrip',
+    afterDraw(chart, args, opts) {
+        const rows = opts && opts.rows;
+        if (!rows || !rows.length) return;
+        const xScale = chart.scales.x;
+        if (!xScale) return;
+
+        const ctx = chart.ctx;
+        const rowH   = 20;
+        const rowGap = 2;
+        let rowTop = xScale.bottom + 6;
+
+        ctx.save();
+
+        rows.forEach(row => {
+            const data = row.data;
+            if (!data || !data.length) { rowTop += rowH + rowGap; return; }
+            const n = data.length;
+
+            // Standard histogram binning: each cell spans from the midpoint
+            // with its left neighbor to the midpoint with its right neighbor.
+            // At the ends we clamp to the chart area so the first and last
+            // cells — whose data points now sit exactly on the plot edges
+            // (ticks.align: 'inner') — don't spill over and clip their text.
+            const xLeft  = xScale.left;
+            const xRight = xScale.right;
+            const gap    = 1.5;  // visual separator between cells
+            for (let i = 0; i < n; i++) {
+                const xCenter = xScale.getPixelForValue(i);
+                let binLeft, binRight;
+                if (n === 1) {
+                    binLeft  = xCenter - 12;
+                    binRight = xCenter + 12;
+                } else if (i === 0) {
+                    binLeft  = xLeft;
+                    binRight = (xCenter + xScale.getPixelForValue(i + 1)) / 2;
+                } else if (i === n - 1) {
+                    binLeft  = (xScale.getPixelForValue(i - 1) + xCenter) / 2;
+                    binRight = xRight;
+                } else {
+                    binLeft  = (xScale.getPixelForValue(i - 1) + xCenter) / 2;
+                    binRight = (xCenter + xScale.getPixelForValue(i + 1)) / 2;
+                }
+                const cellX = binLeft + gap / 2;
+                const cellW = Math.max(1, binRight - binLeft - gap);
+                // Text centered on the bin midpoint (NOT the data point), so
+                // edge cells stay inside their cell and don't get clipped.
+                const textX = cellX + cellW / 2;
+
+                const v = data[i];
+                ctx.fillStyle = row.color ? row.color(v, i) : '#1a2e42';
+                ctx.fillRect(cellX, rowTop, cellW, rowH);
+
+                // Subtle inner border for a tidy grid look.
+                ctx.strokeStyle = 'rgba(30, 48, 72, 0.9)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cellX + 0.5, rowTop + 0.5, cellW - 1, rowH - 1);
+
+                // Cell content — either a custom render (e.g. rotated arrow)
+                // or the default text label.
+                if (row.renderCell) {
+                    row.renderCell(ctx, textX, rowTop, cellW, rowH, v, i);
+                } else {
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+                    ctx.fillStyle = row.textColor ? row.textColor(v, i) : '#fff';
+                    const label = row.label ? row.label(v, i) : String(v);
+                    ctx.fillText(label, textX, rowTop + rowH / 2);
+                }
+            }
+
+            // Axis label on the left, inside the y-axis gutter.
+            // Per-row `weight: 'bold'` upgrades both font-weight AND color
+            // for emphasis — at 9px, bold alone is too subtle to read; the
+            // brighter color is what makes the row pop. Single intent
+            // ("emphasize") drives both visual changes.
+            if (row.axisLabel) {
+                const emphasized = row.weight === 'bold';
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.font = `${emphasized ? '700' : 'normal'} 9px -apple-system, sans-serif`;
+                ctx.fillStyle = emphasized ? '#7fb0d8' : '#3a6a8a';
+                ctx.fillText(row.axisLabel, xScale.left - 4, rowTop + rowH / 2);
+            }
+
+            rowTop += rowH + rowGap;
+        });
+
+        ctx.restore();
+    }
+};
+Chart.register(dataStripPlugin);
+
+// Chart.js plugin: tints the pre-sunrise and post-sunset regions with a
+// translucent indigo wash and draws vertical dashed lines at sunrise + sunset.
+// Times are labeled in the sun-info pills above the chart, so the plugin draws
+// no text — just the visual cues. The x position is linearly interpolated
+// between the two data points straddling each moment so a 6:24 AM sunrise
+// lands correctly between the 5 AM and 8 AM steps.
+//
+// Options schema:
+//   { timestamps: number[], sunrise?: number, sunset?: number }
+const sunBarsPlugin = {
+    // Run before the dataset so the night tint sits under the line + fill.
+    id: 'sunBars',
+    beforeDatasetsDraw(chart, args, opts) {
+        if (!opts) return;
+        const ts = opts.timestamps;
+        if (!ts || !ts.length) return;
+        const xScale = chart.scales.x;
+        const area   = chart.chartArea;
+        if (!xScale || !area) return;
+
+        const n = ts.length;
+        const pixelForTs = (t) => {
+            if (t == null) return null;
+            if (t < ts[0] || t > ts[n - 1]) return null;
+            for (let i = 0; i < n - 1; i++) {
+                if (ts[i] <= t && ts[i + 1] >= t) {
+                    const span = ts[i + 1] - ts[i];
+                    const frac = span > 0 ? (t - ts[i]) / span : 0;
+                    const x0 = xScale.getPixelForValue(i);
+                    const x1 = xScale.getPixelForValue(i + 1);
+                    return x0 + (x1 - x0) * frac;
+                }
+            }
+            return xScale.getPixelForValue(n - 1);
+        };
+
+        const ctx = chart.ctx;
+        const xSunrise = pixelForTs(opts.sunrise);
+        const xSunset  = pixelForTs(opts.sunset);
+        const tint = 'rgba(76, 81, 191, 0.09)';   // very subtle indigo wash
+
+        ctx.save();
+        // Clip to the plot area so the wash doesn't bleed over the axes.
+        ctx.beginPath();
+        ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        ctx.clip();
+        ctx.fillStyle = tint;
+        // Left-of-sunrise band: area.left → sunrise
+        if (xSunrise != null && xSunrise > area.left) {
+            ctx.fillRect(area.left, area.top, xSunrise - area.left, area.bottom - area.top);
+        } else if (xSunrise == null && opts.sunrise != null && ts.length && opts.sunrise > ts[n - 1]) {
+            // Sunrise is past the visible window → whole chart is pre-sunrise night.
+            ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        }
+        // Right-of-sunset band: sunset → area.right
+        if (xSunset != null && xSunset < area.right) {
+            ctx.fillRect(xSunset, area.top, area.right - xSunset, area.bottom - area.top);
+        } else if (xSunset == null && opts.sunset != null && ts.length && opts.sunset < ts[0]) {
+            // Sunset already past before the visible window → whole chart is night.
+            ctx.fillRect(area.left, area.top, area.right - area.left, area.bottom - area.top);
+        }
+        // Dashed vertical bars — also in beforeDatasetsDraw so they sit
+        // behind the gradient fill and the data lines.
+        const drawBar = (x) => {
+            if (x == null) return;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(100, 130, 160, 0.6)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(x, area.top);
+            ctx.lineTo(x, area.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        };
+        drawBar(pixelForTs(opts.sunrise));
+        drawBar(pixelForTs(opts.sunset));
+        ctx.restore();
+    }
+};
+Chart.register(sunBarsPlugin);
+
+// Chart.js plugin: draws a dashed horizontal reference line at a given y value.
+// Uses beforeDatasetsDraw so the line sits behind the gradient fill and data.
+//
+// Options schema:
+//   { y: number, color?: string, label?: string }
+const refLinePlugin = {
+    id: 'refLine',
+    beforeDatasetsDraw(chart, args, opts) {
+        if (!opts || opts.y == null) return;
+        const yScale = chart.scales.y;
+        const area   = chart.chartArea;
+        if (!yScale || !area) return;
+        const y = yScale.getPixelForValue(opts.y);
+        if (y < area.top - 1 || y > area.bottom + 1) return;
+
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = opts.color || 'rgba(100, 130, 160, 0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(area.left, y);
+        ctx.lineTo(area.right, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (opts.label) {
+            ctx.font = '600 10px -apple-system, sans-serif';
+            ctx.fillStyle = opts.color || 'rgba(100, 130, 160, 0.8)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(opts.label, area.left + 6, y - 3);
+        }
+        ctx.restore();
+    }
+};
+Chart.register(refLinePlugin);
+
+// Scan every loaded location and return the max wind or gust value within the
+// active period, so all three cards can share a single Y-axis ceiling and the
+// visual comparison across locations is meaningful.
+function computeGlobalWindMax() {
+    let mx = 0;
+    locations.forEach(loc => {
+        const raw = weatherData[loc.id];
+        if (!raw) return;
+        const d = filterByPeriod(raw, activePeriod);
+        if (!d) return;
+        for (let i = 0; i < d.windSpeed.length; i++) {
+            const w = parseFloat(msToMs(d.windSpeed[i]));
+            const g = parseFloat(msToMs(d.gusts[i]));
+            if (w > mx) mx = w;
+            if (g > mx) mx = g;
+        }
+    });
+    return mx;
+}
+
+// Same idea as computeGlobalWindMax() but for the temp chart: returns the
+// min/max °C across every loaded location for the active day so all three
+// temp charts share an identical y-range. Returns null if no data is loaded.
+function computeGlobalTempRange() {
+    let mn = Infinity, mx = -Infinity;
+    locations.forEach(loc => {
+        const raw = weatherData[loc.id];
+        if (!raw) return;
+        const d = filterByPeriod(raw, activePeriod);
+        if (!d) return;
+        for (let i = 0; i < d.temp.length; i++) {
+            const c = parseFloat(kToC(d.temp[i]));
+            if (c < mn) mn = c;
+            if (c > mx) mx = c;
+        }
+    });
+    if (!isFinite(mn) || !isFinite(mx)) return null;
+    return { min: mn, max: mx };
+}
+
+const baseOpts = (unit, gridColor = '#0e1a28', onHoverIdx = null) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    // Fires whenever the cursor moves over the chart (even between points).
+    // We forward the active point's data index so the card header updates live.
+    onHover: (evt, items, chart) => {
+        if (!onHoverIdx) return;
+        if (items && items.length) {
+            onHoverIdx(items[0].index);
+        }
+    },
+    plugins: {
+        legend: { labels: { color: '#4a7a9a', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: {
+            backgroundColor: '#0c1520',
+            borderColor: '#1e3048',
+            borderWidth: 1,
+            titleColor: '#e0eaf4',
+            bodyColor: '#7aa8c8',
+            callbacks: {
+                label: ctx => {
+                    const base = ` ${ctx.dataset.label}: ${ctx.parsed.y} ${unit}`;
+                    // Append °F only on the temperature chart — `unit` is the
+                    // baseOpts arg, so this branch never fires for wind (m/s).
+                    if (unit === '°C') {
+                        const f = (ctx.parsed.y * 9 / 5 + 32).toFixed(1);
+                        return `${base}  /  ${f} °F`;
+                    }
+                    return base;
+                }
+            }
+        }
+    },
+    scales: {
+        // `offset: true` divides the plot area into N equal slots and centers
+        // each data point in its slot. That gives the strip-plugin cells below
+        // the chart uniform widths across all N steps (including the first /
+        // last) and keeps the labels "2 AM" / "11 PM" inside the plot area so
+        // no half-label reserve is needed on either side.
+        x: { ticks: { color: '#3a6a8a', font: { size: 10 }, maxRotation: 45 }, grid: { color: gridColor }, offset: true },
+        y: { ticks: { color: '#3a6a8a', font: { size: 11 }, callback: v => `${(+Number(v).toFixed(1))}${unit}` }, grid: { color: gridColor } }
+    }
+});
+
+function drawChart(locId, type, d) {
+    const key = `${locId}`;
+    if (chartInstances[key]) { chartInstances[key].destroy(); delete chartInstances[key]; }
+
+    const canvas = document.getElementById(`chart-${locId}`);
+    if (!canvas) return;
+
+    const labels = d.timestamps.map(fmtHour);
+    // Callback handed to Chart's onHover — syncs every card's header to the
+    // hour under the cursor (not just the one being hovered).
+    const hoverHandler = (idx) => syncHover(locId, idx);
+    let cfg;
+
+    if (type === 'temp') {
+        const vals = d.temp.map(k => parseFloat(kToC(k)));
+        const precipVals = d.precip.map(p => parseFloat((+p).toFixed(2)));
+        // Any hour before sunrise or after sunset for the active day is "night",
+        // so the sky row renders a moon instead of a sun when the sky is clear.
+        const isNightTs = (ts) => {
+            if (!d.sunrise || !d.sunset) return false;
+            return ts < d.sunrise || ts >= d.sunset;
+        };
+        // Combine cloud cover, WMO weather code and the day/night flag per hour
+        // so the sky row can color the cell by cloudiness and pick a glyph that
+        // matches both conditions and time of day.
+        const skyVals = d.cloud.map((c, i) => ({
+            cloud: c,
+            code:  d.wcode ? d.wcode[i] : null,
+            night: isNightTs(d.timestamps[i])
+        }));
+        const opts = baseOpts('°C', '#0e1a28', hoverHandler);
+        // 5 strip rows × 20 + 4 × 2px gaps + 6px top + 4px tail = 118 px, round up.
+        opts.layout = { padding: { bottom: 124 } };
+
+        // Share the temp y-axis across every location card (same pattern as
+        // the wind chart) so the three cards are directly comparable at a
+        // glance — one card looking "warmer" means it actually is warmer.
+        const tempRange = computeGlobalTempRange();
+        if (tempRange) {
+            const pad = Math.max(1, (tempRange.max - tempRange.min) * 0.1);
+            opts.scales.y.min = Math.floor(tempRange.min - pad);
+            opts.scales.y.max = Math.ceil(tempRange.max + pad);
+        }
+
+        opts.plugins = {
+            ...opts.plugins,
+            // Hide the legend on the temp chart — there's only one series and
+            // the gradient line already communicates the color scale visually.
+            legend: { display: false },
+            dataStrip: {
+                rows: [
+                    {
+                        // Cloudiness / sky conditions — pale warm = sunny, cool
+                        // gray = overcast. Glyph reflects the WMO code or falls
+                        // back to the cloud-cover percentage if code is missing.
+                        // Night hours swap ☀/🌤 for 🌙.
+                        data: skyVals,
+                        color: (v) => cloudBg(v.cloud),
+                        axisLabel: 'sky',
+                        renderCell: (ctx, xCenter, rowTop, cellW, rowH, v) => {
+                            const g = weatherGlyph(v.code, v.cloud, v.night);
+                            if (!g) return;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.font = '13px -apple-system, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+                            ctx.fillStyle = '#fff';
+                            ctx.fillText(g, xCenter, rowTop + rowH / 2);
+                        }
+                    },
+                    {
+                        // UV index — WHO scale: green(low) → yellow → orange → red → violet(extreme)
+                        data: d.uv_index ? d.uv_index.map(v => v != null ? Math.round(v * 10) / 10 : null) : [],
+                        color: uvColor,
+                        label: v => v == null ? '—' : (v < 0.5 ? '—' : String(Math.round(v))),
+                        textColor: cellTextForUV,
+                        axisLabel: 'UV',
+                        weight: 'bold'
+                    },
+                    {
+                        data: precipVals,
+                        color: precipColor,
+                        label: v => v < 0.05 ? '—' : v < 1 ? v.toFixed(2) : v.toFixed(1),
+                        textColor: cellTextForPrecip,
+                        axisLabel: '💧 mm',
+                        weight: 'bold'
+                    },
+                    {
+                        // Relative humidity — amber for dry, teal for comfort,
+                        // blue as the air gets muggy. Numbers printed with a
+                        // trailing "%" so the unit is never ambiguous.
+                        data: d.rh.map(v => v == null ? null : Math.round(v)),
+                        color: humidityColor,
+                        label: v => v == null ? '—' : `${v}%`,
+                        textColor: cellTextForHumidity,
+                        axisLabel: 'RH'
+                    },
+                    {
+                        // Pressure in mmHg — warm gold = high pressure (fair),
+                        // steel-gray = normal, orange-red = low (stormy).
+                        data: d.pressure ? d.pressure.map(v => v != null ? Math.round(v) : null) : [],
+                        color: pressureColor,
+                        label: v => v == null ? '—' : String(v),
+                        textColor: cellTextForPressure,
+                        axisLabel: 'mmHg'
+                    }
+                ]
+            },
+            // Sunrise + sunset as vertical dashed bars, interpolated between
+            // neighboring data points so they sit at the exact local time.
+            sunBars: {
+                timestamps: d.timestamps,
+                sunrise: d.sunrise,
+                sunset:  d.sunset
+            }
+        };
+        // Segment + point colors driven by tempColor() so the temperature line
+        // shifts hue smoothly along the curve — cool purples at night give way
+        // to blue in the morning, green midday, warm orange when it peaks.
+        // Mirrors the wind chart's per-segment gradient pattern.
+        const tempSegColor = (ctx) => {
+            const chart = ctx.chart;
+            const area  = chart.chartArea;
+            if (!area) return tempColor(ctx.p0.parsed.y ?? 0);
+
+            const xScale = chart.scales.x;
+            const yScale = chart.scales.y;
+            const x0 = xScale.getPixelForValue(ctx.p0DataIndex);
+            const x1 = xScale.getPixelForValue(ctx.p1DataIndex);
+            const y0 = yScale.getPixelForValue(ctx.p0.parsed.y);
+            const y1 = yScale.getPixelForValue(ctx.p1.parsed.y);
+
+            if (x0 === x1 && y0 === y1) return tempColor(ctx.p0.parsed.y ?? 0);
+
+            const grad = chart.ctx.createLinearGradient(x0, y0, x1, y1);
+            grad.addColorStop(0, tempColor(ctx.p0.parsed.y ?? 0));
+            grad.addColorStop(1, tempColor(ctx.p1.parsed.y ?? 0));
+            return grad;
+        };
+        cfg = {
+            type: 'line',
+            data: { labels, datasets: [{
+                label: 'Temperature', data: vals,
+                borderColor: '#fb923c',
+                backgroundColor: 'transparent',   // fill handled by makeGradientFillPlugin
+                fill: false, tension: 0.45, pointRadius: 3,
+                pointBackgroundColor: ctx => tempColor(ctx.parsed.y ?? 0),
+                pointBorderColor:     ctx => tempColor(ctx.parsed.y ?? 0),
+                segment: { borderColor: tempSegColor }
+            }]},
+            options: opts,
+            plugins: [ makeGradientFillPlugin({ colorFn: tempColorRgb }) ]
+        };
+    } else {
+        // type === 'wind' — line chart of wind + gusts on top, followed by
+        // three colored strips below (wind speed, gust speed, direction).
+        const wVals = d.windSpeed.map(ms => parseFloat(msToMs(ms)));
+        const gVals = d.gusts.map(ms => parseFloat(msToMs(ms)));
+        const dirVals = d.windDir.map(x => x);
+
+        const opts = baseOpts('m/s', '#0e1a28', hoverHandler);
+        // 3 strip rows × 20px + 2 × 2px gaps + 6px top + 4px tail = 74px.
+        opts.layout = { padding: { bottom: 74 } };
+
+        // Share the same y-axis ceiling across every location card for the
+        // active day so visually comparing wind strength between cards is
+        // meaningful. Floor at 5.5 m/s so the 5 m/s reference line always has
+        // a bit of headroom above it on calm days.
+        const globalWindMax = computeGlobalWindMax();
+        opts.scales.y.min = 0;
+        opts.scales.y.max = Math.max(5.5, Math.ceil(globalWindMax + 0.5));
+
+        opts.plugins = {
+            ...opts.plugins,
+            // Hide the legend — solid line is wind, dashed is gusts; the cell
+            // strips and sun pills above carry the rest of the context.
+            legend: { display: false },
+            // Dashed horizontal line at 5 m/s — a handy "starting to feel windy"
+            // threshold that sits at the top of the green band in the wind color scale.
+            refLine: { y: 5, color: 'rgba(100, 130, 160, 0.6)', label: '5 m/s' },
+            // Night tint + sunrise/sunset dashed bars, same as the temp chart.
+            sunBars: {
+                timestamps: d.timestamps,
+                sunrise: d.sunrise,
+                sunset:  d.sunset
+            },
+            dataStrip: {
+                rows: [
+                    {
+                        data: wVals,
+                        color: (v) => windColor(v),
+                        label: (v) => v.toFixed(1),
+                        textColor: cellTextForWind,
+                        axisLabel: 'wind'
+                    },
+                    {
+                        data: gVals,
+                        color: (v) => windColor(v),
+                        label: (v) => v.toFixed(1),
+                        textColor: cellTextForWind,
+                        axisLabel: 'gust'
+                    },
+                    {
+                        data: dirVals,
+                        // Neutral dark background — the arrow carries the info.
+                        color: () => '#152236',
+                        axisLabel: 'dir',
+                        // Draw a small arrow pointing in the direction the wind
+                        // is blowing toward (meteorology stores "from" direction,
+                        // so we add 180° to flip it into "toward"). An upward
+                        // glyph with zero rotation would mean "wind toward north".
+                        renderCell: (ctx, xCenter, rowTop, cellW, rowH, deg) => {
+                            const cy = rowTop + rowH / 2;
+                            ctx.save();
+                            ctx.translate(xCenter, cy);
+                            ctx.rotate((deg + 180) * Math.PI / 180);
+                            ctx.strokeStyle = '#7dd3fc';
+                            ctx.fillStyle = '#7dd3fc';
+                            ctx.lineWidth = 1.4;
+                            ctx.lineCap = 'round';
+                            ctx.lineJoin = 'round';
+                            // Vertical shaft
+                            ctx.beginPath();
+                            ctx.moveTo(0, -6);
+                            ctx.lineTo(0, 6);
+                            ctx.stroke();
+                            // Arrowhead
+                            ctx.beginPath();
+                            ctx.moveTo(0, -7);
+                            ctx.lineTo(-3.5, -2);
+                            ctx.lineTo(3.5, -2);
+                            ctx.closePath();
+                            ctx.fill();
+                            ctx.restore();
+                        }
+                    }
+                ]
+            }
+        };
+
+        // Segment + point colors driven by the same windColor() scale the
+        // strips use below, so the line and the cells communicate the exact
+        // same intensity at a glance. Each segment is a canvas linear gradient
+        // between its two endpoints so color shifts smoothly along the curve
+        // (rather than hard-stepping at every data point).
+        const segColor = (ctx) => {
+            const chart = ctx.chart;
+            const area  = chart.chartArea;
+            // chartArea is undefined on the very first paint — bail with a
+            // solid fallback; Chart.js will re-call this with valid data.
+            if (!area) return windColor(ctx.p0.parsed.y ?? 0);
+
+            const xScale = chart.scales.x;
+            const yScale = chart.scales.y;
+            const x0 = xScale.getPixelForValue(ctx.p0DataIndex);
+            const x1 = xScale.getPixelForValue(ctx.p1DataIndex);
+            const y0 = yScale.getPixelForValue(ctx.p0.parsed.y);
+            const y1 = yScale.getPixelForValue(ctx.p1.parsed.y);
+
+            // Degenerate case (same pixel) — fall back to a solid color.
+            if (x0 === x1 && y0 === y1) return windColor(ctx.p0.parsed.y ?? 0);
+
+            const grad = chart.ctx.createLinearGradient(x0, y0, x1, y1);
+            grad.addColorStop(0, windColor(ctx.p0.parsed.y ?? 0));
+            grad.addColorStop(1, windColor(ctx.p1.parsed.y ?? 0));
+            return grad;
+        };
+        cfg = {
+            type: 'line',
+            data: { labels, datasets: [
+                {
+                    label: 'Wind', data: wVals,
+                    borderColor: '#4ade80',
+                    backgroundColor: 'transparent',  // fill handled by makeGradientFillPlugin
+                    fill: false, tension: 0.45, pointRadius: 3,
+                    pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
+                    pointBorderColor:     ctx => windColor(ctx.parsed.y ?? 0),
+                    segment: { borderColor: segColor }
+                },
+                {
+                    label: 'Gusts', data: gVals,
+                    borderColor: '#f97316',
+                    backgroundColor: 'transparent',
+                    fill: false, tension: 0.45, borderDash: [5,3], pointRadius: 2,
+                    pointBackgroundColor: ctx => windColor(ctx.parsed.y ?? 0),
+                    pointBorderColor:     ctx => windColor(ctx.parsed.y ?? 0),
+                    segment: { borderColor: segColor }
+                }
+            ]},
+            options: opts,
+            plugins: [ makeWindMaxFillPlugin({ colorFn: windColorRgb }) ]
+        };
+    }
+
+    chartInstances[key] = new Chart(canvas.getContext('2d'), cfg);
+}
+
+// Switch the chart type on EVERY loaded card at once. The user clicked a tab
+// on one card; we mirror that selection across the rest so the dashboard always
+// compares the same metric across locations.
+function switchTab(locId, type, btn) {
+    activeChartTab = type;
+    localStorage.setItem('wx-chart-tab', type);
+
+    // Update every card's tab button state (the one that was clicked + siblings on other cards)
+    document.querySelectorAll('.chart-tabs').forEach(tabs => {
+        tabs.querySelectorAll('.chart-tab').forEach(t => {
+            t.classList.toggle('active', t.dataset.tabType === type);
+        });
+    });
+
+    // Redraw every card's chart with the new type, preserving their own data.
+    locations.forEach(loc => {
+        if (!weatherData[loc.id]) return;
+        const filtered = filterByPeriod(weatherData[loc.id], activePeriod);
+        if (!filtered) return;
+        filteredDataCache[loc.id] = filtered;
+        drawChart(loc.id, type, filtered);
+        // Re-attach the mouseleave reset — a new canvas replaces the old one each time.
+        const canvas = document.getElementById(`chart-${loc.id}`);
+        if (canvas) canvas.addEventListener('mouseleave', () => resetHoverAll());
+    });
+}
+
+// ── Daily Insights view renderer ────────────────────────────────────────────
+// Builds the HTML string for the Insights pane. Reads from INSIGHTS.dailyInsights()
+// in insights.js — engine returns phase verdict + three trajectory categories
+// (pressure / temp / wind). This function turns that into DOM. Kept here (not
+// in insights.js) so the prose, SVG sparkline, and tile layout stay in the
+// rendering layer.
+function renderInsightsView(loc, rawD) {
+    if (typeof INSIGHTS === 'undefined' || !INSIGHTS.dailyInsights) {
+        return `<div class="no-data-msg">Insights engine not loaded yet.</div>`;
+    }
+
+    // ── Day anchor ─────────────────────────────────────────────────────────
+    // Insights are anchored to the currently selected day tab. The engine's
+    // `nowMs` param shifts every calc (phase, deltas, sparkline window) so the
+    // same code path serves both "what's happening now" (Today) and "what's
+    // forecasted for Mon" (future days).
+    //
+    // Today  → wall-clock NOW (sparkline ends at the current hour — matches
+    //           the "Now" badge in the Data view).
+    // Other  → 2 PM PT of the selected day (matches the Data view's default
+    //           "2 PM" badge for non-today days, so the headline value in
+    //           Insights == the headline value in Data for the same day).
+    //
+    // The headline is THE single number a user reads first; aligning it
+    // across Data and Insights kills the confusion source where Mon read
+    // "26°C" in Data and "23°C" in Insights for the same day.
+    const todayPTStr = ptDateStr(Date.now());
+    const isToday = (activePeriod === todayPTStr);
+    const anchorMs = (!activePeriod || isToday)
+        ? Date.now()
+        : ptHourToUtcMs(activePeriod, 14);   // 2 PM PT
+
+    const di = INSIGHTS.dailyInsights(rawD, anchorMs);
+    if (!di) {
+        return `<div class="no-data-msg">Not enough data for Insights.<br>Switch back to <b>Data</b> for the forecast view.</div>`;
+    }
+
+    // Day label for the top of the pane — "Today, Sat 16" or "Mon, May 18".
+    // Stays small + muted; the day tabs are the primary day selector, this is
+    // just a confirmation that the insights reflect that selection.
+    const dayLabel = (function() {
+        const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const [y, m, d] = (di.todayDate || activePeriod || todayPTStr).split('-').map(Number);
+        const refUtc = Date.UTC(y, m - 1, d, 12, 0, 0);
+        const wd = ptWeekday(refUtc);
+        return isToday
+            ? `Today · ${names[wd]} ${d}`
+            : `${names[wd]}, ${months[m-1]} ${d}`;
+    })();
+
+    const tone  = PHASE_TONE_MAP[di.phase]  || 'neutral';
+    const label = PHASE_LABEL_MAP[di.phase] || di.phase;
+    const conf  = di.confidence || 'low';
+
+    // Per-category trend bands, SCALED BY LOOKBACK WINDOW.
+    //
+    // Bass don't respond to gross deltas — they respond to rate-of-change
+    // relative to their ~24h bladder-equalization window (Study §1). A
+    // 6 mmHg fall over 24h is a system passing through; the same 6 mmHg
+    // spread over 72h is slow drift the fish adapt to in real time. So
+    // each band scales linearly with window length: same RATE = same tier
+    // at every timescale.
+    //
+    // Tier definitions per category:
+    //   PRESSURE   drift = noise floor, action = clear movement,
+    //              severe = storm-level. Asymmetric at 24H only
+    //              (soft falls matter more than soft rises because pre-
+    //              frontal feed signals are inherently more valuable).
+    //   TEMP/WIND  symmetric drift/wide bands, scaled linearly with window.
+    //
+    // 24H bands come from the scoring rules directly (canonical thresholds).
+    // 48H/72H are 2× and 3× of those — same rate, scaled to the lookback.
+    const PRESSURE_BANDS = {
+        24: { drift: 1.5, fallAction: 3, riseAction: 4, severe: 7  },
+        48: { drift: 3.0, fallAction: 6, riseAction: 6, severe: 14 },
+        72: { drift: 4.5, fallAction: 9, riseAction: 9, severe: 21 }
+    };
+    const TEMP_BANDS = {
+        24: { drift: 1.0, wide: 3.0 },
+        48: { drift: 2.0, wide: 6.0 },
+        72: { drift: 3.0, wide: 9.0 }
+    };
+    const WIND_BANDS = {
+        24: { drift: 0.5, wide: 1.5 },
+        48: { drift: 1.0, wide: 3.0 },
+        72: { drift: 1.5, wide: 4.5 }
+    };
+
+    // Lookup helper — falls back to 24H bands when window is unknown so
+    // existing call sites that haven't been updated yet still get the
+    // canonical thresholds.
+    function bandsFor(category, windowH) {
+        const w = windowH || 24;
+        if (category === 'pressure') return PRESSURE_BANDS[w] || PRESSURE_BANDS[24];
+        if (category === 'temp')     return TEMP_BANDS[w]     || TEMP_BANDS[24];
+        return WIND_BANDS[w] || WIND_BANDS[24];
+    }
+
+    // ── Bass-fishing polarity ──────────────────────────────────────────────
+    // Colors express FISHING relevance, not raw weather direction. Same
+    // 5-tier spectrum the Weekend Insights and the phase chip already use:
+    //   good       — strong positive (front building, warming, settling wind)
+    //   good-mild  — right direction, mild magnitude
+    //   neutral    — true noise band, no signal either way
+    //   warn       — mild headwind (post-front, cooling, roughening)
+    //   bad        — strong negative (bluebird, cold crash, gale OR dead calm)
+    //
+    // Category-specific reasoning:
+    //   PRESSURE   asymmetric — falling = pre-front feed (good), rising =
+    //              clearing/bluebird (warn/bad). The single strongest signal.
+    //   TEMP       biology-driven — warming activates bass (good); cooling
+    //              pushes them deeper (warn); rapid drops shut them down (bad).
+    //   WIND       INVERTED from temp — falling wind = settling, less chop,
+    //              fish near surface (good). Rising wind heads toward rough
+    //              water (warn/bad). PLUS an absolute-state override: dead
+    //              calm right now (< 1 m/s, matching the engine's `calm`
+    //              threshold) kills the bite regardless of trend — glass
+    //              water has no ripple, no oxygenation, no cover.
+    //
+    // absNow is optional. Pressure and temp ignore it; wind uses it for the
+    // calm override. Passing it everywhere keeps the call site uniform.
+    const CALM_WIND_MS = 1.0;  // matches insights.js wind.direction = 'calm'
+
+    function deltaPolarity(category, v, absNow, windowH) {
+        if (v == null) return 'neutral';
+        const b = bandsFor(category, windowH);
+
+        if (category === 'pressure') {
+            // Window-scaled bands per scoring rules. The asymmetry between
+            // fallAction (3) and riseAction (4) lives in the 24H row only —
+            // a soft pre-frontal fall at the bladder-equalization timescale
+            // carries real signal, while a soft post-front rise of the same
+            // magnitude is usually still in the drift noise.
+            if (Math.abs(v) <= b.drift)  return 'neutral';
+            if (v <= -b.severe)          return 'bad';        // storm-level fall
+            if (v >=  b.severe)          return 'bad';        // sharp rebound
+            if (v <= -b.fallAction)      return 'good';       // pre-front feed window
+            if (v <   0)                 return 'good-mild';  // soft fall, partial signal
+            if (v >=  b.riseAction)      return 'warn';       // post-front Day 1
+            return 'neutral';                                  // soft rise — still drift
+        }
+
+        if (category === 'temp') {
+            const inNoise = (v > -b.drift && v < b.drift);
+            if (inNoise)        return 'neutral';
+            if (v >=  b.wide)   return 'good';
+            if (v >   0)        return 'good-mild';
+            if (v <= -b.wide)   return 'bad';
+            return 'warn';
+        }
+
+        // Wind — trend INVERTED, plus calm-state override.
+        let pol;
+        const inNoise = (v > -b.drift && v < b.drift);
+        if (inNoise)            pol = 'neutral';
+        else if (v <= -b.wide)  pol = 'good';        // strong settling
+        else if (v <   0)       pol = 'good-mild';   // soft settling
+        else if (v >=  b.wide)  pol = 'bad';         // gale building
+        else                    pol = 'warn';        // light rise toward rough
+
+        // Absolute override — dead calm RIGHT NOW kills the bite regardless
+        // of trend. "Falling further into glass" is the worst case.
+        if (absNow != null && absNow < CALM_WIND_MS) {
+            if (pol === 'good' || pol === 'good-mild') pol = 'warn';
+            else if (pol === 'neutral')                pol = 'bad';
+        }
+        return pol;
+    }
+
+    // Polarity → hex (matches insight-reason dot palette so the eye reads the
+    // same "green = good, yellow = warn, red = bad" language everywhere).
+    const POL_COLOR = {
+        'good':      '#4ade80',
+        'good-mild': '#86efac',
+        'neutral':   '#7a96b0',  // muted slate — same as old "steady"
+        'warn':      '#fbbf24',
+        'bad':       '#f87171'
+    };
+
+    function strokeFor(category, overall, absNow) {
+        return POL_COLOR[deltaPolarity(category, overall, absNow)] || POL_COLOR.neutral;
+    }
+
+    // ── Per-point color-by-value (matches the Data view's daily charts) ──
+    //
+    // The Insights sparkline now stitches three days together into one strip.
+    // We want the eye to read the *absolute* state along it: cold blues at
+    // night, warm yellows mid-afternoon, etc. That's the same language the
+    // Data view's day-by-day temp/wind/pressure charts already use, so we
+    // reuse those exact color functions here.
+    //
+    // tempColor / windColor (outer scope) work on the Data view's "identity"
+    // scale: color = where you are on the temperature/wind axis. We reuse
+    // those directly in Insights because they already say what we want
+    // ("this is a cold morning / this is a breezy afternoon").
+    //
+    // Pressure is special. Unlike temp/wind, the *absolute* mmHg reading has
+    // a direct fishing meaning: low pressure (pre-frontal) triggers bass
+    // feeding, bluebird highs shut the bite down. So while the Data view
+    // uses pressureColor() in meteorological convention (low=red=storm), the
+    // Insights sparkline FLIPS the semantics: low=green=feed, high=red=bite-off.
+    //
+    // 5-tier step palette mirrors the polarity colors used by the delta tiles
+    // and the Weekend "Best window" cards — one color language across the
+    // whole card. Step bins (not interpolated) because bass behavior is
+    // zone-triggered, not smooth: the bite "turns on" when pressure drops
+    // through ~1010 hPa, doesn't fade continuously.
+    //
+    // Zone breakpoints (approx):
+    //   < 752 mmHg (< 29.61 inHg)  good       — strong low, prime feed
+    //   752–757   (29.61–29.80)    good-mild  — soft low / pre-front
+    //   757–764   (29.80–30.06)    neutral    — typical baseline
+    //   764–768   (30.06–30.22)    warn       — high building, bite slowing
+    //   > 768     (> 30.22)        bad        — bluebird dome, lethargic bass
+    function pressureColorBass(mmhg) {
+        if (mmhg == null || isNaN(mmhg)) return '#94a3b8';
+        if (mmhg < 752) return '#4ade80';   // good      — strong low
+        if (mmhg < 757) return '#86efac';   // good-mild — soft low
+        if (mmhg < 764) return '#7a96b0';   // neutral   — baseline
+        if (mmhg < 768) return '#fbbf24';   // warn      — high building
+        return '#f87171';                    // bad       — bluebird
+    }
+
+    // Night-range computer for SVG sparklines.
+    //
+    // The Data view shades night hours with a subtle indigo wash + dashed
+    // sunrise/sunset bars (sunBarsPlugin) — we want the same visual cue on
+    // the Insights sparklines so the eye instantly maps "warm bump at 2 PM,
+    // cools through night, warms again next day" instead of seeing temp
+    // curves floating in undifferentiated time.
+    //
+    // sunByDate is keyed by PT date string ('YYYY-MM-DD') with
+    // { sunrise, sunset } timestamps. A 72h window spans 3 PT dates → up
+    // to 3 night ranges to render. We walk one day before the window
+    // start through one day after, so partial nights on the edges
+    // (window starts at 3 AM, half a night already visible) get clipped
+    // correctly into the visible range.
+    //
+    // Why we don't just use `darkHoursForRange()` from the cards: that
+    // helper returns an array of *hour indices* keyed off a specific
+    // timestamp array. The sparkline's x-axis is continuous TIME, not
+    // discrete hour bins — rendering by index would mis-align with a
+    // time-based gradient. So we return raw {start, end} ms-pairs and
+    // let sparkSvg() project them onto its own x-scale.
+    function nightRangesFor(startMs, endMs, sunByDate) {
+        if (!sunByDate || startMs == null || endMs == null) return [];
+        const ranges = [];
+        const dayMs = 24 * 3600 * 1000;
+        // Walk from one day before start to one day after end so partial
+        // edge-nights get included (clipped to window below).
+        let cursor = startMs - dayMs;
+        const stop = endMs + dayMs;
+        const seen = new Set();
+        while (cursor <= stop) {
+            const dStr = ptDateStr(cursor);
+            if (!seen.has(dStr)) {
+                seen.add(dStr);
+                const sun = sunByDate[dStr];
+                if (sun && sun.sunset) {
+                    // This day's "night" = THIS sunset → NEXT day's sunrise.
+                    const nextStr = ptDateStr(cursor + dayMs);
+                    const nextSun = sunByDate[nextStr];
+                    const nightStart = sun.sunset;
+                    const nightEnd = (nextSun && nextSun.sunrise)
+                        ? nextSun.sunrise
+                        : nightStart + 12 * 3600 * 1000;   // fallback ≈ 12h
+                    // Clip into the visible window.
+                    const s = Math.max(nightStart, startMs);
+                    const e = Math.min(nightEnd,   endMs);
+                    if (s < e) ranges.push({ start: s, end: e });
+                }
+            }
+            cursor += dayMs;
+        }
+        return ranges;
+    }
+
+    // Sunrise/sunset crossings INSIDE the visible window — for the dashed
+    // vertical bars. Different from nightRangesFor(): a night range
+    // captures the *interval*, this captures the *boundary lines*. Some
+    // crossings fall outside the window (e.g. yesterday's sunset is
+    // older than 72h ago) and we want only the visible ones.
+    function sunCrossingsIn(startMs, endMs, sunByDate) {
+        if (!sunByDate || startMs == null || endMs == null) return [];
+        const out = [];
+        const dayMs = 24 * 3600 * 1000;
+        const seen = new Set();
+        for (let c = startMs - dayMs; c <= endMs + dayMs; c += dayMs) {
+            const dStr = ptDateStr(c);
+            if (seen.has(dStr)) continue;
+            seen.add(dStr);
+            const sun = sunByDate[dStr];
+            if (!sun) continue;
+            if (sun.sunrise != null && sun.sunrise >= startMs && sun.sunrise <= endMs) {
+                out.push(sun.sunrise);
+            }
+            if (sun.sunset != null && sun.sunset >= startMs && sun.sunset <= endMs) {
+                out.push(sun.sunset);
+            }
+        }
+        return out;
+    }
+
+    // Dispatcher used by sparkSvg() (gradient stops) and fmtHeadline()
+    // (headline value). One function per category keeps the call site
+    // free of branching and means the gradient stops can be built in a
+    // single .map() pass.
+    function sparkLineColor(category, v) {
+        if (v == null || isNaN(v)) return '#94a3b8';
+        if (category === 'temp')     return tempColor(v);
+        if (category === 'wind')     return windColor(v);
+        if (category === 'pressure') return pressureColorBass(v);
+        return '#94a3b8';
+    }
+
+    // Headline formatter — current value as a SUMMARY of the chart below it.
+    //
+    // Color comes from the value's IDENTITY on the absolute scale (cold
+    // blue, warm yellow, hot orange for temp; bass valence for pressure).
+    // The rightmost point of the sparkline IS the current value, so
+    // headline-color and sparkline-end-color match by construction.
+    //
+    // The arrow indicates direction over the longest available window
+    // (p72 → p48 → p24 fallback), with the band scaled to whichever
+    // window we ended up using. Arrow color is intentionally muted slate
+    // — direction is informational, the *identity color* (number) carries
+    // the verdict. Decoupling these axes lets a "warming day at a hot
+    // peak" read differently from a "cooling day at a hot peak" without
+    // letting trend hijack the color story.
+    function fmtHeadline(category, cat, fmtVal) {
+        if (cat.now == null) return '—';
+        const nowStr = fmtVal(cat.now);
+        const color  = sparkLineColor(category, cat.now);
+
+        const d = cat.deltas || {};
+        let v, windowH;
+        if (d.p72 != null)      { v = d.p72; windowH = 72; }
+        else if (d.p48 != null) { v = d.p48; windowH = 48; }
+        else                    { v = d.p24; windowH = 24; }
+
+        // No history → just the value in its identity color, no arrow.
+        if (v == null) {
+            return `<span style="color: ${color}">${nowStr}</span>`;
+        }
+
+        // Arrow appears when |v| >= drift/4 — a more permissive threshold
+        // than the polarity drift band itself, so direction shows even
+        // inside the noise zone (with the magnitude staying neutral-colored
+        // there). drift/4 mirrors fmtDelta() so the tiles and headline
+        // agree on what counts as "noticeable movement."
+        const b = bandsFor(category, windowH);
+        const showArrow = Math.abs(v) >= b.drift / 4;
+        if (!showArrow) {
+            return `<span style="color: ${color}">${nowStr}</span>`;
+        }
+        const arrow = (v >= 0) ? '↑' : '↓';
+        return `<span class="di-headline-arrow">${arrow}</span> <span style="color: ${color}">${nowStr}</span>`;
+    }
+
+    // Delta tile formatter.
+    //
+    // Two axes, deliberately decoupled:
+    //   ARROW   shows raw direction (↑/↓) in a single neutral slate color.
+    //           Visible when |v| >= drift/4 — i.e. anything more than a
+    //           quarter of the noise band, which lets direction read
+    //           honestly even inside the drift zone.
+    //   COLOR   on the magnitude number carries the FISHING tier from
+    //           deltaPolarity() — bands now scale by windowH (24/48/72),
+    //           so a 6 mmHg fall over 24h reads "good (action band)"
+    //           while the same 6 mmHg over 72h reads "neutral (drift)".
+    //
+    // Why decouple them: if color carries both direction AND magnitude
+    // ("yellow ↑ rising", "red ↑ rising fast"), then drift becomes
+    // impossible to display honestly — a soft rise in the noise zone
+    // still gets the "rising" warning hue even though the scoring rules
+    // say there's no signal. Splitting the axes means drift always
+    // reads as drift (neutral magnitude) regardless of direction.
+    //
+    // absNow is the current absolute value — only meaningful for wind,
+    // where dead calm RIGHT NOW overrides any "settling is good" trend.
+    function fmtDelta(category, v, windowH, digits, absNow) {
+        if (v == null) return `<span class="di-delta-val dim">—</span>`;
+        const b = bandsFor(category, windowH);
+        const d = digits == null ? 1 : digits;
+        const mag = Math.abs(v).toFixed(d);
+        const pol = deltaPolarity(category, v, absNow, windowH);
+        const showArrow = Math.abs(v) >= b.drift / 4;
+        const arrowHtml = showArrow
+            ? `<span class="di-delta-arrow">${v >= 0 ? '↑' : '↓'}</span>`
+            : '';
+        return `<span class="di-delta-val">${arrowHtml}<span class="pol-${pol}">${mag}</span></span>`;
+    }
+
+    // SVG sparkline + Windy-style filled area. preserveAspectRatio="none"
+    // stretches across whatever width the card gives us.
+    //
+    // Y-axis = SHARED across the whole forecast window. We use cat.bounds
+    // (computed by the engine over past 3d + 7d forward) so clicking through
+    // day tabs reveals the actual "shape of the week" — a flat Today sits low
+    // on the temp chart, a Wed heatwave peak sits near the top, all on the
+    // same scale. Falls back to local min/max + floor if bounds are missing
+    // (e.g. JSON-only path before Open-Meteo enrichment).
+    //
+    // Color = per-point absolute value (mirrors the Data view's daily charts).
+    // Two gradients work together:
+    //   • horizontal value-based gradient — one stop per sample, color from
+    //     sparkLineColor(category, v). Applied to BOTH stroke and fill, so
+    //     line and area share the same hue at every x.
+    //   • vertical mask — white-with-low-opacity gradient (30% top → 2%
+    //     bottom). Multiplies the fill's alpha so it fades into the baseline
+    //     like the original Windy-style area, but keeps the line crisp.
+    //
+    // Reading the sparkline L→R you now see the value's identity along time:
+    // cold blues in the morning, warm yellows in the afternoon, red at peak.
+    // Three days of overnight cold + daytime warmth stitched together look
+    // like the Data view's daily temp chart concatenated.
+    function sparkSvg(category, cat, opts) {
+        // Prefer the display-only sparkline (dawn → dusk frame) when the
+        // engine provides one — falls back to the 72h sparkline used for
+        // all engine math when sun data isn't available. The engine
+        // numbers (now, deltas, peakGust, bounds) are computed from
+        // cat.sparkline; this branch only affects the VISUAL line and
+        // the x-axis range. Nothing in the polarity/classification path
+        // reads sparklineDisplay.
+        const spark = (cat.sparklineDisplay && cat.sparklineDisplay.length >= 2)
+            ? cat.sparklineDisplay
+            : cat.sparkline;
+        if (!spark || spark.length < 2) {
+            return `<div class="di-spark-empty">72h trajectory unavailable — limited past data.</div>`;
+        }
+
+        let min, max;
+        if (cat.bounds) {
+            // 8% headroom top + bottom so the curve never touches the edges
+            // — important visual breathing room, especially when a future
+            // day sits at the absolute peak/floor of the window.
+            const pad = (cat.bounds.max - cat.bounds.min) * 0.08;
+            min = cat.bounds.min - pad;
+            max = cat.bounds.max + pad;
+        } else {
+            const vs = spark.map(s => s.v);
+            min = Math.min(...vs);
+            max = Math.max(...vs);
+        }
+        const range = Math.max(max - min, opts.floor);
+
+        // P is split into Px (horizontal) and Py (vertical) so the chart
+        // can stretch edge-to-edge horizontally (Px = 0) while keeping a
+        // few pixels of vertical breathing room (Py = 3) so the line's
+        // peaks and troughs don't clip against the top/bottom edges.
+        const W = 320, H = 110, Px = 0, Py = 3;
+        // Switched from index-based to TIME-BASED x positioning so the
+        // sparkline shares a coordinate system with the night-shading
+        // rectangles below it. Without this, a missing hour (gap in
+        // timestamps) would compress visually on the index axis while
+        // the night rect — drawn at real sunset ms — would slide out of
+        // alignment.
+        //
+        // PREFER cat.dispWindow when present: it's the explicit dawn(72h-ago)
+        // → dusk(today) frame computed in insights.js. Using sample boundaries
+        // (spark[0].t / spark[last].t) lets data gaps shrink the frame —
+        // e.g. if today's last sample lands at 2 PM, the frame would end at
+        // 2 PM instead of dusk, dropping today's daylight band entirely and
+        // creating edge-night strips. The explicit window keeps the chart
+        // visually stable regardless of data availability.
+        const tStart = (cat.dispWindow && cat.dispWindow.start != null)
+            ? cat.dispWindow.start
+            : spark[0].t;
+        const tEnd   = (cat.dispWindow && cat.dispWindow.end   != null)
+            ? cat.dispWindow.end
+            : spark[spark.length - 1].t;
+        const tRange = Math.max(tEnd - tStart, 1);
+        const xForT  = (t) => Px + ((t - tStart) / tRange) * (W - 2 * Px);
+
+        const pts = spark.map(s => {
+            const x = xForT(s.t);
+            const y = H - Py - ((s.v - min) / range) * (H - 2 * Py);
+            return { x, y };
+        });
+        const lineStr = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        // Close the polygon back to the baseline so the fill makes a Windy-
+        // style area chart: line → bottom-right corner → bottom-left corner.
+        const baseY = H - Py;
+        const fillStr = lineStr +
+            ` ${pts[pts.length - 1].x.toFixed(1)},${baseY.toFixed(1)}` +
+            ` ${pts[0].x.toFixed(1)},${baseY.toFixed(1)}`;
+
+        // Gradient IDs must be unique within the document. With multiple
+        // cards × 3 sparklines each, scope by locId+category.
+        const idBase   = `spark-${opts.locId}-${category}`;
+        const hGradId  = `hg-${idBase}`;     // horizontal value-based gradient
+        const vGradId  = `vg-${idBase}`;     // vertical fade for the mask
+        const maskId   = `m-${idBase}`;      // mask combining the two
+
+        // One <stop> per sample. Stop offsets are sample positions along the
+        // chart's x-range — converted from each sample's timestamp through
+        // the same xForT() projection as the polyline, so the gradient
+        // and line stay in lock-step even with uneven hour spacing.
+        const n = spark.length;
+        const stops = spark.map(s => {
+            const x      = xForT(s.t);
+            const offset = ((x - Px) / (W - 2 * Px)) * 100;
+            const color  = sparkLineColor(category, s.v);
+            return `<stop offset="${offset.toFixed(2)}%" stop-color="${color}"/>`;
+        }).join('');
+
+        // ── Night-shading layer ────────────────────────────────────────────
+        // Subtle indigo wash for night intervals. The day/night rhythm
+        // alone carries the temporal structure — we previously had dashed
+        // bars at each sunrise/sunset crossing too, but they were doing
+        // the same job as the night blocks (delineating day from night)
+        // with more visual noise. Removed for cleanliness; the night
+        // wash + the weekday chip labels are now the only temporal cues
+        // inside the chart. Drawn BEHIND the polygon fill so the data
+        // shape stays the foreground subject.
+        let nightHtml = '';
+        if (opts.sunByDate) {
+            const nights = nightRangesFor(tStart, tEnd, opts.sunByDate);
+            nightHtml = nights.map(r => {
+                const x = xForT(r.start);
+                const w = Math.max(xForT(r.end) - x, 0.5);
+                return `<rect x="${x.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}" fill="rgba(76,81,191,0.09)"/>`;
+            }).join('');
+        }
+
+        return `
+            <svg class="di-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+                <defs>
+                    <linearGradient id="${hGradId}" x1="0" y1="0" x2="1" y2="0">
+                        ${stops}
+                    </linearGradient>
+                    <linearGradient id="${vGradId}" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%"   stop-color="white" stop-opacity="0.30"/>
+                        <stop offset="100%" stop-color="white" stop-opacity="0.02"/>
+                    </linearGradient>
+                    <mask id="${maskId}">
+                        <rect width="${W}" height="${H}" fill="url(#${vGradId})"/>
+                    </mask>
+                </defs>
+                ${nightHtml}
+                <polygon points="${fillStr}" fill="url(#${hGradId})" mask="url(#${maskId})" stroke="none"/>
+                <polyline points="${lineStr}" fill="none" stroke="url(#${hGradId})" stroke-width="1.5"/>
+            </svg>
+        `;
+    }
+
+    // Section renderer — one block per category. Headline value sits inline
+    // with the section label on the same row, then sparkline, then 3 delta
+    // tiles. This is the visual unit Andrew asked for: three of these stack.
+    function section(category, title, cat, opts) {
+        const fmtVal = opts.fmtVal;         // (number) → string
+        const fmtSub = opts.fmtSub;         // optional subtitle on the right (e.g. gust value)
+        const floor  = opts.floor;          // y-range floor (fallback when bounds null)
+        const digits = opts.deltaDigits;    // decimals for delta tile values
+        const unit   = cat.unit || '';
+
+        // Headline now carries 48h trend arrow + polarity color. The unit
+        // and gust sub-line live OUTSIDE the polarity span so they keep
+        // their own muted slate styling — only the number+arrow take color.
+        const headHtml = fmtHeadline(category, cat, fmtVal);
+        const subStr  = fmtSub ? fmtSub(cat) : '';
+        const subHtml = subStr ? `<span class="di-section-sub">${subStr}</span>` : '';
+
+        // ── Chip-to-chart alignment ─────────────────────────────────────────
+        // Each chip sits on the DAY SEGMENT it labels — the full daytime
+        // band (sunrise → sunset) of that day. Night blocks become empty
+        // spacer columns between chips, matching the visual rhythm of the
+        // chart above:
+        //   [lead] [Day 72H = chip] [Night] [Day 48H = chip] [Night] [Day 24H = chip] [trail = Night + today]
+        // 7 columns total, 3 chip cells + 4 spacer cells.
+        //
+        // Why day-segments and not 24h-windows: a 24h-window chip (e.g.
+        // Sat 2 PM → Sun 2 PM) crosses Night 1, so the chip "container"
+        // visually overlaps with a night block in the chart. Day-segments
+        // map each chip to a single daylight band so chip rhythm matches
+        // chart rhythm.
+        //
+        // Falls back to even three-up if sunByDate is missing for any
+        // of the three reference days.
+        const spark = (cat.sparklineDisplay && cat.sparklineDisplay.length >= 2)
+            ? cat.sparklineDisplay
+            : cat.sparkline;
+        let gridCols;   // CSS grid-template-columns value (7 columns)
+        if (spark && spark.length >= 2 && opts.anchorMs != null && opts.sunByDate) {
+            // Mirror sparkSvg's frame logic — prefer the explicit dispWindow
+            // so chip columns align to the SAME x-axis the chart uses, even
+            // when data samples don't reach the dispWindow edges.
+            const tStart = (cat.dispWindow && cat.dispWindow.start != null)
+                ? cat.dispWindow.start
+                : spark[0].t;
+            const tEnd   = (cat.dispWindow && cat.dispWindow.end   != null)
+                ? cat.dispWindow.end
+                : spark[spark.length - 1].t;
+            const tRange = Math.max(tEnd - tStart, 1);
+            const a      = opts.anchorMs;
+            const H      = 3600 * 1000;
+            // Resolve PT date string for an absolute UTC ms — mirrors the
+            // pattern used in insights.js (subtract 7h, read UTC fields).
+            const ptDate = (ts) => {
+                const pt = new Date(ts - 7 * H);
+                return pt.toISOString().slice(0, 10);
+            };
+            const sun72 = opts.sunByDate[ptDate(a - 72 * H)];
+            const sun48 = opts.sunByDate[ptDate(a - 48 * H)];
+            const sun24 = opts.sunByDate[ptDate(a - 24 * H)];
+            const haveAllSun = sun72 && sun72.sunrise && sun72.sunset &&
+                               sun48 && sun48.sunrise && sun48.sunset &&
+                               sun24 && sun24.sunrise && sun24.sunset;
+            if (haveAllSun) {
+                const clamp01 = (x) => Math.max(0, Math.min(1, x));
+                const f       = (t) => clamp01((t - tStart) / tRange);
+                const lead  = (f(sun72.sunrise) - 0)                    * 100;
+                const w72   = (f(sun72.sunset)  - f(sun72.sunrise))     * 100;
+                const gap1  = (f(sun48.sunrise) - f(sun72.sunset))      * 100;
+                const w48   = (f(sun48.sunset)  - f(sun48.sunrise))     * 100;
+                const gap2  = (f(sun24.sunrise) - f(sun48.sunset))      * 100;
+                const w24   = (f(sun24.sunset)  - f(sun24.sunrise))     * 100;
+                const trail = (1 - f(sun24.sunset))                     * 100;
+                gridCols = `${lead.toFixed(2)}% ${w72.toFixed(2)}% ${gap1.toFixed(2)}% ${w48.toFixed(2)}% ${gap2.toFixed(2)}% ${w24.toFixed(2)}% ${trail.toFixed(2)}%`;
+            } else {
+                // Missing sun info for one of the three reference days →
+                // fall back to even 4-up: three weekday chips + Selected
+                // chip get equal width. (Pre-Selected this was 3-up with
+                // trail=0%, but now the Selected label needs room or it
+                // clips under .di-delta { overflow: hidden }.)
+                gridCols = `0% 25% 0% 25% 0% 25% 25%`;
+            }
+        } else {
+            // No spark, no anchor, or no sunByDate → same even 4-up
+            // fallback. Trail must keep nonzero width so the Selected
+            // label has space to render (see comment above).
+            gridCols = `0% 25% 0% 25% 0% 25% 25%`;
+        }
+
+        // Chip labels are the weekday name of the day SEGMENT each chip
+        // sits over (e.g. anchor=Mon → 24h chip reads SUN, 48h reads SAT,
+        // 72h reads FRI). Anchored to PT because the dashboard is PT
+        // end-to-end. Falls back to cat.now if anchorMs wasn't passed in
+        // — they're usually the same value anyway.
+        const lblAnchor = opts.anchorMs != null ? opts.anchorMs : cat.now;
+        const fmtWeekday = (ms) => new Date(ms).toLocaleDateString('en-US', {
+            weekday: 'short',
+            timeZone: 'America/Los_Angeles'
+        });
+        const lbl72 = fmtWeekday(lblAnchor - 72 * 3600 * 1000);
+        const lbl48 = fmtWeekday(lblAnchor - 48 * 3600 * 1000);
+        const lbl24 = fmtWeekday(lblAnchor - 24 * 3600 * 1000);
+
+        return `
+            <div class="di-section">
+                <div class="di-section-head">
+                    <div class="di-section-label">${title}</div>
+                    <div class="di-section-val">
+                        ${headHtml}<span class="di-section-unit">${unit}</span>${subHtml}
+                    </div>
+                </div>
+                ${sparkSvg(category, cat, { floor, locId: loc.id, sunByDate: opts.sunByDate })}
+                <div class="di-deltas" style="grid-template-columns: ${gridCols};">
+                    <!-- 7-cell grid mirroring the chart's day/night rhythm:
+                           [lead] [Day-3 chip] [Night 1] [Day-2 chip] [Night 2] [Day-1 chip] [trail]
+                         Each chip occupies the sunrise→sunset band of its
+                         reference day and is labeled with that day's
+                         weekday name (e.g. SUN ↑1.5 if yesterday was
+                         Sunday). The 24h-ago chip carries the scoring
+                         verdict (Signal 1 — what state are bass in RIGHT
+                         NOW). The 48h-ago and 72h-ago chips are
+                         SUPPORTING CONTEXT (.ctx — same hue family, lower
+                         saturation) so the eye reads them as context, not
+                         three equal verdicts. -->
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta ctx">
+                        <span class="di-delta-label">${lbl72}</span>
+                        ${fmtDelta(category, cat.deltas.p72, 72, digits, cat.now)}
+                    </div>
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta ctx">
+                        <span class="di-delta-label">${lbl48}</span>
+                        ${fmtDelta(category, cat.deltas.p48, 48, digits, cat.now)}
+                    </div>
+                    <div class="di-delta-spacer"></div>
+                    <div class="di-delta">
+                        <span class="di-delta-label">${lbl24}</span>
+                        ${fmtDelta(category, cat.deltas.p24, 24, digits, cat.now)}
+                    </div>
+                    <!-- Trail cell sits in the post-sunset band of the
+                         selected day. No delta to show (you can't compare
+                         the selected day to itself), so it carries only a
+                         "Selected" label as a wayfinding anchor — tells
+                         the eye which day-band the chart belongs to. -->
+                    <div class="di-delta di-delta-selected">
+                        <span class="di-delta-label">Selected</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Sun data flows from rawD (built once per location in fetch path,
+    // keyed by 'YYYY-MM-DD' PT date) through every section so the
+    // sparklines can shade night intervals.
+    const sunByDate = rawD && rawD.sunByDate;
+
+    const pressureSection = section('pressure', 'Pressure', di.pressure, {
+        fmtVal: v => v.toFixed(1),
+        floor: 0.5,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+    const tempSection = section('temp', 'Temperature', di.temp, {
+        fmtVal: v => v.toFixed(1),
+        floor: 1.0,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+    const windSection = section('wind', 'Wind & gust', di.wind, {
+        fmtVal: v => v.toFixed(1),
+        // peak gust appears as a sub-stat on the right of the headline
+        fmtSub: cat => cat.peakGust != null
+            ? `· gust ${cat.peakGust.toFixed(1)} <span class="di-section-sub-unit">m/s</span>`
+            : '',
+        floor: 0.5,
+        deltaDigits: 1,
+        sunByDate,
+        anchorMs
+    });
+
+    return `
+        <div class="di-pane">
+            <div class="di-top">
+                <div class="di-chip tone-${tone}" title="${di.phase} · confidence: ${conf}">
+                    ${label}
+                    <span class="di-dot ${conf}"></span>
+                </div>
+                <div class="di-rationale-block">
+                    <div class="di-day-label">${dayLabel}</div>
+                    ${di.rationale}
+                </div>
+            </div>
+            ${pressureSection}
+            ${tempSection}
+            ${windSection}
+        </div>
+    `;
+}
+
+// Flip the GLOBAL card view between Data (default) and Insights (phase chip
+// + 72h trajectory). Mirrors how setChartTab works: one click flips every
+// card so the dashboard reads consistently. Persists to localStorage so the
+// chosen lens survives reloads. Re-uses populateCard so the rendering path
+// stays single-source per card.
+function setView(view) {
+    if (view !== 'data' && view !== 'insights') view = 'data';
+    if (activeCardView === view) return;   // no-op if already there
+    activeCardView = view;
+    try { localStorage.setItem('wx-card-view', view); } catch (e) {}
+
+    // Sync the active class on EVERY card's switcher pair. We iterate all
+    // .view-switcher containers rather than relying on the clicked button's
+    // parent — clicking one button has to update the visual state of all
+    // five other cards' switchers too.
+    document.querySelectorAll('.view-switcher').forEach(switcher => {
+        switcher.querySelectorAll('.view-btn').forEach(b => {
+            const isActive = b.id.startsWith(`view-${view}-`);
+            b.classList.toggle('active', isActive);
+        });
+    });
+
+    // Re-render every card. populateCard branches on activeCardView.
+    locations.forEach(loc => {
+        const rawD = weatherData[loc.id];
+        if (rawD) populateCard(loc, rawD);
+    });
+}
+
+// ── Insights (bass fishing) ──────────────────────────────────────────────────
+// renderSummary() is the public entry point — keeps the historical name so all
+// the existing call sites (refresh, water-switch, period-switch, model-switch)
+// don't need to be edited. For freshwater it delegates to renderInsights();
+// for saltwater it hides the section entirely (bass model doesn't apply).
+function renderSummary() {
+    const section = document.getElementById('summary-section');
+    if (!section) return;
+
+    if (activeLocationSet !== 'freshwater') {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    renderInsights();
+}
+
+// Format an insights window object → "Sat 7am–9am" (PT).
+// Mirrors the formatter in test-insights.js so dashboard + harness agree.
+function fmtInsightsWindow(w) {
+    if (!w || w.ts == null) return '';
+    // The harness uses (w.ts - 7h) then reads UTC parts to get PDT. That works
+    // year-round here because the dashboard is PDT-locked (see CLAUDE.md / the
+    // scraper's PDT-only schema). If we ever support PST winters we'll swap to
+    // Intl.DateTimeFormat with timeZone:'America/Los_Angeles'.
+    const ptMs   = w.ts - 7 * 3600 * 1000;
+    const ptDate = new Date(ptMs);
+    const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][ptDate.getUTCDay()];
+    const hCenter = w.hourCenter;
+    const start   = (hCenter + 23) % 24;
+    const end     = (hCenter + 1) % 24;
+    const fmt = h => {
+        const ampm = h < 12 ? 'am' : 'pm';
+        const h12  = h % 12 === 0 ? 12 : h % 12;
+        return `${h12}${ampm}`;
+    };
+    return `${dayName} ${fmt(start)}–${fmt(end)}`;
+}
+
+// Map composite score (0–100) → tier class for the score pill.
+function insightScoreClass(score) {
+    if (score >= 70) return '';      // green
+    if (score >= 50) return 'med';   // yellow
+    if (score >= 30) return 'low';   // orange
+    return 'bad';                    // red
+}
+
+// Phase → semantic tone (5-tier polarity per project memory) and short label
+// for chips. Module-scope so all three lenses (weeklyOutlook arc, weekend
+// scoring cards, daily Insights view) share one source of truth — keeping
+// the maps in lockstep is called out explicitly in the phase-taxonomy memory.
+// SETTLED  = mid-band quiet → good-mild (stable regime, biology dominates).
+// LOW_STABLE = parked weak low → warn (bass sluggish, distinct from SETTLED).
+// UNSTABLE = classifier gap → neutral (NOT a verdict, an "I don't know").
+const PHASE_TONE_MAP = {
+    PRE_FRONT:   'good',
+    STABLE_HIGH: 'good-mild',
+    SETTLED:     'good-mild',
+    LOW_STABLE:  'warn',
+    PASSAGE:     'warn',
+    DAY_1_POST:  'bad',
+    DAY_2_POST:  'warn',
+    RIDGE:       'warn',
+    UNSTABLE:    'neutral'
+};
+// Short labels — keep ≤7 chars so chips don't blow up at small breakpoints.
+const PHASE_LABEL_MAP = {
+    PRE_FRONT:   'PRE',
+    STABLE_HIGH: 'STABLE',
+    SETTLED:     'STEADY',
+    LOW_STABLE:  'LOW',
+    PASSAGE:     'PASS',
+    DAY_1_POST:  'D1 POST',
+    DAY_2_POST:  'D2 POST',
+    RIDGE:       'RIDGE',
+    UNSTABLE:    'UNSURE'
+};
+
+// Weekly outlook renderer — picks up macro pattern data from INSIGHTS.weeklyOutlook
+// and composes a single readable line. Hidden when the engine returns null
+// (not enough data). Kept here (not in insights.js) so the prose / day-name
+// formatting stays in the rendering layer.
+function renderWeeklyOutlook() {
+    const el = document.getElementById('weekly-outlook');
+    if (!el) return;
+    if (typeof INSIGHTS === 'undefined' || !INSIGHTS.weeklyOutlook) {
+        el.style.display = 'none';
+        return;
+    }
+    const loaded = locations.filter(l => weatherData[l.id]);
+    if (loaded.length < 2) { el.style.display = 'none'; return; }
+
+    const today = (typeof ptDateStr === 'function')
+        ? ptDateStr(Date.now())
+        : new Date().toISOString().slice(0, 10);
+
+    let outlook;
+    try {
+        outlook = INSIGHTS.weeklyOutlook(loaded, weatherData, today);
+    } catch (e) {
+        console.error('[outlook] computation failed:', e);
+        el.style.display = 'none';
+        return;
+    }
+    if (!outlook) { el.style.display = 'none'; return; }
+
+    // ISO date → short day name (Sun..Sat) for prose.
+    const dayName = iso => {
+        const [y, m, d] = iso.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d, 12));
+        return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
+    };
+
+    // Horizon-edge handling: when the peak / valley sits on the last day of
+    // the forecast, we can't claim it's an apex — the trend likely continues
+    // past our visible data. Swap copy to be honest about that, and append a
+    // ↗ / ↘ marker after the day name as a visual cue.
+    const horizonNote = `<span class="wo-horizon-note">Forecast ends here; trend likely continues past horizon.</span>`;
+    let headline = '';
+    switch (outlook.pattern) {
+        case 'warming':
+            if (outlook.peakAtHorizon) {
+                headline = `<strong>Warming through end of forecast</strong> — climbing ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.valleyDay)}, hitting ${outlook.peakC.toFixed(0)}°C on ${dayName(outlook.peakDay)} <span class="wo-arrow">↗</span>. ${horizonNote}`;
+            } else {
+                headline = `<strong>Warming through ${dayName(outlook.peakDay)}</strong> — peak ${outlook.peakC.toFixed(0)}°C, climbing ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.valleyDay)}.`;
+            }
+            break;
+        case 'cooling':
+            if (outlook.valleyAtHorizon) {
+                headline = `<strong>Cooling through end of forecast</strong> — dropping ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.peakDay)}, hitting ${outlook.valleyC.toFixed(0)}°C on ${dayName(outlook.valleyDay)} <span class="wo-arrow">↘</span>. ${horizonNote}`;
+            } else {
+                headline = `<strong>Cooling through ${dayName(outlook.valleyDay)}</strong> — low ${outlook.valleyC.toFixed(0)}°C, dropping ${outlook.rangeC.toFixed(1)}°C from ${dayName(outlook.peakDay)}.`;
+            }
+            break;
+        case 'midweek_peak':
+            headline = `<strong>Peak heat ${dayName(outlook.peakDay)}</strong> (${outlook.peakC.toFixed(0)}°C) — cooler bracketing it. Front buildup.`;
+            break;
+        case 'midweek_valley':
+            headline = `<strong>Cool dip ${dayName(outlook.valleyDay)}</strong> (${outlook.valleyC.toFixed(0)}°C) — warmer either side. Front passage.`;
+            break;
+        case 'steady':
+            headline = `<strong>Steady week</strong> — daily means hold within ${outlook.rangeC.toFixed(1)}°C. No macro signal.`;
+            break;
+        case 'mixed':
+        default:
+            headline = `<strong>Mixed pattern</strong> — no single weekly trend; lakes diverge.`;
+            break;
+    }
+
+    // Most/least lake callout — only when there's real divergence between lakes
+    // (>= 1°C spread between most and least impacted), and the week itself is
+    // moving (steady patterns wouldn't have meaningful divergence to report).
+    let impactLine = '';
+    if (outlook.showSpread && outlook.pattern !== 'steady') {
+        impactLine = `Most affected: <strong>${outlook.mostImpacted.name}</strong> (${outlook.mostImpacted.rangeC.toFixed(1)}°C swing) · Least: <strong>${outlook.leastImpacted.name}</strong> (${outlook.leastImpacted.rangeC.toFixed(1)}°C)`;
+    }
+
+    // ── Track A additions: week pattern tag + phase arc (PRD §2) ────────────
+    // outlook.weekTag : { tag, confidence, evidence } | null
+    // outlook.phases  : [{ date, phase, confidence }, ...] | null
+    //
+    // Renderer is defensive — if either is missing (engine failure, old data
+    // shape, or not enough history) the row is simply omitted. No breakage.
+    // PHASE_TONE_MAP / PHASE_LABEL_MAP live at module scope (top of file).
+
+    let weekTagHtml = '';
+    if (outlook.weekTag && outlook.weekTag.tag) {
+        const wt = outlook.weekTag;
+        const conf = wt.confidence || 'medium';
+        weekTagHtml = `
+            <div class="wo-week-tag">
+                <span class="wt-label">Week pattern</span>
+                <span class="wt-value">${wt.tag}</span>
+                <span class="wt-sep">·</span>
+                <span class="wt-conf ${conf}">confidence: ${conf}</span>
+            </div>
+        `;
+    }
+
+    let phaseArcHtml = '';
+    if (Array.isArray(outlook.phases) && outlook.phases.length > 0) {
+        // ISO → short weekday for the chip label (Sat / Sun / …).
+        const shortDay = iso => {
+            const [y, m, d] = iso.split('-').map(Number);
+            const dt = new Date(Date.UTC(y, m - 1, d, 12));
+            return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getUTCDay()];
+        };
+        const cells = outlook.phases.map(p => {
+            const tone   = PHASE_TONE_MAP[p.phase]  || 'neutral';
+            const label  = PHASE_LABEL_MAP[p.phase] || p.phase;
+            const conf   = p.confidence || 'low';
+            const dayLbl = shortDay(p.date);
+            // Tooltip carries the full phase name + confidence for affordance.
+            const title = `${p.phase} · confidence: ${conf}`;
+            return `
+                <div class="wo-phase-cell" title="${title}">
+                    <span class="wpc-day">${dayLbl}</span>
+                    <div class="wo-phase-chip tone-${tone}">
+                        ${label}
+                        <span class="wpc-dot ${conf}"></span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        phaseArcHtml = `<div class="wo-phase-arc">${cells}</div>`;
+    }
+
+    el.className = `weekly-outlook ${outlook.pattern}`;
+    el.style.display = '';
+    el.innerHTML = `
+        <div class="wo-label">Weekly outlook</div>
+        <div class="wo-headline">${headline}</div>
+        ${impactLine ? `<div class="wo-impact">${impactLine}</div>` : ''}
+        ${weekTagHtml}
+        ${phaseArcHtml}
+    `;
+}
+
+function renderInsights() {
+    renderWeeklyOutlook();
+    const head = document.getElementById('insights-head');
+    const grid = document.getElementById('insights-grid');
+    if (!grid) return;
+
+    // Guard: scripts loaded? Data ready?
+    if (typeof INSIGHTS === 'undefined' || typeof LAKE_META === 'undefined') {
+        grid.innerHTML = `<div class="insight-empty">Insights engine not loaded.</div>`;
+        if (head) head.innerHTML = '';
+        return;
+    }
+    const loaded = locations.filter(l => weatherData[l.id]);
+    if (!loaded.length) {
+        grid.innerHTML = `<div class="insight-empty">Waiting on forecast data…</div>`;
+        if (head) head.innerHTML = '';
+        return;
+    }
+
+    // Today in PT, formatted YYYY-MM-DD — matches what insights.js expects.
+    const today = (typeof ptDateStr === 'function')
+        ? ptDateStr(Date.now())
+        : new Date().toISOString().slice(0, 10);
+
+    let verdicts = [];
+    try {
+        verdicts = INSIGHTS.scoreAllLocations(loaded, weatherData, today);
+    } catch (e) {
+        console.error('[insights] scoring failed:', e);
+        grid.innerHTML = `<div class="insight-empty">Scoring error — see console.</div>`;
+        return;
+    }
+
+    // Header: weekend label + tiny "as of" line. Kept compact.
+    if (head) {
+        let weekendLabel = '';
+        try {
+            const wkend = INSIGHTS.getWeekend(today);
+            if (wkend && wkend.length) {
+                const first = new Date(wkend[0] + 'T12:00:00Z')
+                    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const last  = new Date(wkend[wkend.length - 1] + 'T12:00:00Z')
+                    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                weekendLabel = wkend.length === 1 ? first : `${first} – ${last}`;
+            }
+        } catch (e) { /* non-fatal */ }
+        head.innerHTML = `
+            <span class="ih-window">Best window per lake · Fri–Sun ${weekendLabel ? '(' + weekendLabel + ')' : ''}</span>
+            <span>Top of list = best score · cards account for trend, pressure, wind, rain, and your time prefs</span>
+        `;
+    }
+
+    if (!verdicts.length) {
+        grid.innerHTML = `<div class="insight-empty">No weekend windows in the forecast horizon.</div>`;
+        return;
+    }
+
+    // No medal emojis — rank-1 already gets a green-tinted border + background,
+    // and the list is sorted top→bottom, so ordering is unambiguous without
+    // decoration. Per Andrew's feedback, fewer emojis = less clutter.
+    grid.innerHTML = verdicts.map((v, i) => {
+        const scoreCls = insightScoreClass(v.score);
+        const modeCls  = v.mode === 'active' ? '' : 'ambush';
+        const modeLabel = v.mode === 'active' ? 'Active mode' : 'Ambush mode';
+        const reasons = (v.reasons || []).map(r => {
+            // polarity is set by insights.js — fall back to neutral if a future
+            // reason type forgets it, rather than silently dropping the dot.
+            const polCls = r.polarity ? `r-${r.polarity}` : '';
+            return `
+            <li class="insight-reason ${polCls}">
+                <div>
+                    ${r.signal}
+                    ${r.why ? `<span class="ir-why">${r.why}</span>` : ''}
+                </div>
+            </li>`;
+        }).join('');
+        return `
+            <div class="insight-card rank-${i + 1}">
+                <div class="insight-head">
+                    <span class="insight-name">${v.loc.name}</span>
+                    <span class="insight-score ${scoreCls}">${v.score.toFixed(0)}</span>
+                </div>
+                <div class="insight-window">
+                    <span>${fmtInsightsWindow(v.window)}</span>
+                    ${v.alternateWindow ? `<span class="iw-or">or</span><span class="iw-alt">${fmtInsightsWindow(v.alternateWindow)}</span>` : ''}
+                </div>
+                <span class="insight-mode ${modeCls}">Bass: ${modeLabel}</span>
+                <ul class="insight-reasons">${reasons}</ul>
+            </div>`;
+    }).join('');
+}
+
+// ── Stability Forecast ────────────────────────────────────────────────────────
+// Cross-location weather stability ranker. Compares every loaded location
+// across three time windows (Now / Next Weekend / Weekend After) and scores
+// each on a 0–100 stability index. The goal is to surface which reservoir
+// has the calmest, driest, most-temperate window coming up — filtering out
+// heatwaves, cold snaps, big day-to-day temp drops, heavy rain, and windy
+// mornings (anything over 5 m/s before noon loses points fast).
+//
+// All reasoning is surfaced as small color-coded chips under each row so the
+// user can see at a glance *why* a location ranked where it did — the score
+// is never a mystery number.
+
+// Hour of day in Pacific time for a UTC timestamp (0–23).
+function getPtHour(ts) {
+    const s = new Date(ts).toLocaleString('en-US', {
+        timeZone: PT, hour: '2-digit', hour12: false
+    });
+    // Some locales return "24" for midnight — normalise to 0.
+    return parseInt(s, 10) % 24;
+}
+
+// "Apr 25" style label for a YYYY-MM-DD PT date string.
+function ptShortDate(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    return dt.toLocaleDateString('en-US', {
+        timeZone: PT, month: 'short', day: 'numeric'
+    });
+}
+
+// Return the next `count` upcoming Sat/Sun pairs as { sat, sun } date strings.
+// "Upcoming" means the next Saturday on-or-after today, unless today is
+// Sunday — in which case we jump to the following Saturday so we don't try
+// to pair Sunday with a past Saturday.
+function upcomingWeekends(count) {
+    const today = Date.now();
+    const wd = ptWeekday(today);                     // 0=Sun … 6=Sat
+    const daysToSat = (6 - wd + 7) % 7;              // 0 if Sat, 6 if Sun
+    const weekends = [];
+    for (let w = 0; w < count; w++) {
+        weekends.push({
+            sat: ptDateStrOffset(daysToSat + w * 7),
+            sun: ptDateStrOffset(daysToSat + w * 7 + 1)
+        });
+    }
+    return weekends;
+}
+
+// Build the three time-window definitions used by the panel.
+function buildStabilityWindows() {
+    const today = ptDateStr(Date.now());
+    const [w1, w2] = upcomingWeekends(2);
+    return [
+        { title: 'Now',            sub: ptShortDate(today),                              dateStrs: [today] },
+        { title: 'Next Weekend',   sub: `${ptShortDate(w1.sat)} – ${ptShortDate(w1.sun)}`, dateStrs: [w1.sat, w1.sun] },
+        { title: 'Weekend After',  sub: `${ptShortDate(w2.sat)} – ${ptShortDate(w2.sun)}`, dateStrs: [w2.sat, w2.sun] }
+    ];
+}
+
+// Aggregate stability metrics for one location across a set of PT dates.
+// Returns null if we don't have any hourly samples inside the window (the
+// forecast horizon may not reach that far yet).
+function aggregateWindow(raw, dateStrs) {
+    if (!raw || !raw.timestamps || !raw.timestamps.length) return null;
+    const all = [];
+    const byDay = Object.create(null);
+    dateStrs.forEach(ds => { byDay[ds] = []; });
+    for (let i = 0; i < raw.timestamps.length; i++) {
+        const ds = ptDateStr(raw.timestamps[i]);
+        if (byDay[ds]) { all.push(i); byDay[ds].push(i); }
+    }
+    if (!all.length) return null;
+
+    const temps = all.map(i => parseFloat(kToC(raw.temp[i])));
+    const precs = all.map(i => raw.precip[i] || 0);
+
+    // Morning wind — 5 AM through noon PT (captures the 5, 8, 11 slots on
+    // the 3-hourly Open-Meteo grid, which is what the user cares about).
+    const morningIdx = all.filter(i => {
+        const h = getPtHour(raw.timestamps[i]);
+        return h >= 5 && h <= 12;
+    });
+    const morningWinds = morningIdx.map(i => parseFloat(msToMs(raw.windSpeed[i])));
+    const morningGusts = morningIdx.map(i => parseFloat(msToMs(raw.gusts[i])));
+
+    // Per-day avg temp → biggest day-to-day swing inside the window.
+    const dayAvgs = dateStrs
+        .map(ds => {
+            const idx = byDay[ds];
+            if (!idx || !idx.length) return null;
+            const ts = idx.map(i => parseFloat(kToC(raw.temp[i])));
+            return ts.reduce((a, b) => a + b, 0) / ts.length;
+        })
+        .filter(v => v != null);
+    let dayDelta = 0;
+    for (let i = 1; i < dayAvgs.length; i++) {
+        dayDelta = Math.max(dayDelta, Math.abs(dayAvgs[i] - dayAvgs[i - 1]));
+    }
+
+    return {
+        minTemp: Math.min(...temps),
+        maxTemp: Math.max(...temps),
+        diurnal: Math.max(...temps) - Math.min(...temps),
+        totalPrecip: precs.reduce((a, b) => a + b, 0),
+        avgMorningWind: morningWinds.length ? morningWinds.reduce((a, b) => a + b, 0) / morningWinds.length : null,
+        maxMorningWind: morningWinds.length ? Math.max(...morningWinds) : null,
+        maxMorningGust: morningGusts.length ? Math.max(...morningGusts) : null,
+        dayDelta
+    };
+}
+
+// Score a window on the user's stability criteria:
+//   - No heavy rain
+//   - No heatwaves, no cold snaps
+//   - No big day-to-day temp drops
+//   - Morning wind (5 AM – noon) below 5 m/s
+// Returns { score (0-100), chips: [{kind, label}] } — chips explain the score.
+function scoreStability(agg) {
+    let score = 100;
+    const chips = [];
+
+    // ── Rain (weighted heaviest — "no intense rains") ─────────────────────
+    const p = agg.totalPrecip;
+    if      (p >= 5)   { score -= 40; chips.push({ kind: 'bad',  label: `${p.toFixed(1)}mm rain` }); }
+    else if (p >= 2)   { score -= 25; chips.push({ kind: 'warn', label: `${p.toFixed(1)}mm rain` }); }
+    else if (p >= 0.5) { score -= 10; chips.push({ kind: 'warn', label: `${p.toFixed(1)}mm rain` }); }
+    else if (p > 0)    { score -= 3;  chips.push({ kind: '',     label: `${p.toFixed(1)}mm rain` }); }
+    else               {              chips.push({ kind: 'good', label: 'dry' }); }
+
+    // ── Heatwave ──────────────────────────────────────────────────────────
+    if      (agg.maxTemp >= 32) { score -= 25; chips.push({ kind: 'bad',  label: `heat ${agg.maxTemp.toFixed(0)}°C` }); }
+    else if (agg.maxTemp >= 28) { score -= 10; chips.push({ kind: 'warn', label: `warm ${agg.maxTemp.toFixed(0)}°C` }); }
+
+    // ── Cold snap ─────────────────────────────────────────────────────────
+    if      (agg.minTemp < 3)   { score -= 20; chips.push({ kind: 'bad',  label: `cold ${agg.minTemp.toFixed(0)}°C` }); }
+    else if (agg.minTemp < 7)   { score -= 5;  chips.push({ kind: 'warn', label: `chilly ${agg.minTemp.toFixed(0)}°C` }); }
+
+    // ── Day-to-day temp swing (only meaningful when window has ≥2 days) ───
+    if      (agg.dayDelta >= 8) { score -= 15; chips.push({ kind: 'bad',  label: `Δ${agg.dayDelta.toFixed(0)}°C day-to-day` }); }
+    else if (agg.dayDelta >= 5) { score -= 7;  chips.push({ kind: 'warn', label: `Δ${agg.dayDelta.toFixed(0)}°C swing` }); }
+
+    // ── Morning wind — the user's hard constraint: calm before noon ───────
+    const mw = agg.avgMorningWind;
+    if (mw == null) {
+        chips.push({ kind: '', label: 'no AM data' });
+    } else if (mw >= 8) {
+        score -= 40;
+        chips.push({ kind: 'bad', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else if (mw >= 5) {
+        score -= 25;
+        chips.push({ kind: 'bad', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else if (mw >= 3) {
+        score -= 5;
+        chips.push({ kind: 'warn', label: `AM wind ${mw.toFixed(1)} m/s` });
+    } else {
+        chips.push({ kind: 'good', label: `calm AM ${mw.toFixed(1)} m/s` });
+    }
+
+    score = Math.max(0, Math.min(100, score));
+    return { score: Math.round(score), chips: chips.slice(0, 5) };
+}
+
+// Render the full Stability Forecast panel (three columns side-by-side).
+function renderStabilityForecast() {
+    const container = document.getElementById('stability-forecast');
+    if (!container) return;
+
+    const windows = buildStabilityWindows();
+    const cols = windows.map(w => renderStabilityCol(w)).join('');
+
+    container.innerHTML = `
+        <div class="stability-forecast">
+            <div class="sf-head">
+                <div class="sf-title">🌤️ Stability Forecast</div>
+                <div class="sf-subtitle">Ranked by: low rain, stable temps, calm mornings (&lt;5 m/s before noon)</div>
+            </div>
+            <div class="sf-grid">${cols}</div>
+        </div>
+    `;
+}
+
+function renderStabilityCol(win) {
+    const rankings = locations
+        .map(loc => {
+            const raw = weatherData[loc.id];
+            if (!raw) return null;
+            const agg = aggregateWindow(raw, win.dateStrs);
+            if (!agg) return null;
+            const { score, chips } = scoreStability(agg);
+            return { loc, agg, score, chips };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+
+    const rows = rankings.length
+        ? rankings.map((r, i) => renderStabilityRow(r, i)).join('')
+        : `<div class="sf-empty">No forecast data in this window yet.</div>`;
+
+    return `
+        <div class="sf-col">
+            <div class="sf-col-head">${win.title}</div>
+            <div class="sf-col-sub">${win.sub}</div>
+            ${rows}
+        </div>
+    `;
+}
+
+function renderStabilityRow(r, i) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const rank = medals[i] || `<span style="color:#4a7a9a">${i + 1}.</span>`;
+    const cls = r.score >= 80 ? '' : r.score >= 60 ? 'med' : r.score >= 40 ? 'low' : 'bad';
+    const chips = r.chips
+        .map(c => `<span class="sf-chip ${c.kind}">${c.label}</span>`)
+        .join('');
+    return `
+        <div class="sf-row">
+            <div class="sf-rank">${rank}</div>
+            <div class="sf-body">
+                <div class="sf-row-head">
+                    <div class="sf-loc">${r.loc.name}</div>
+                    <div class="sf-score ${cls}">${r.score}</div>
+                </div>
+                <div class="sf-reason">${chips}</div>
+            </div>
+        </div>
+    `;
+}
+
+// Expose for console debugging. Initialize the nested shape up front so later
+// code paths that assume `window.wx.raw` exists don't crash when this block
+// runs at script parse time (before loadLocation's `window.wx ||= {raw:{}}`
+// guard, which otherwise no-ops because window.wx is already truthy).
+window.wx = window.wx || {};
+if (!window.wx.raw) window.wx.raw = {};
+if (!window.wx.locations) window.wx.locations = locations;
+window.wx.stability = { renderStabilityForecast, buildStabilityWindows, upcomingWeekends, aggregateWindow, scoreStability };
+
+// ── Load / refresh ────────────────────────────────────────────────────────────
+// Fetch lightweight supplementary fields from Open-Meteo for a location.
+// Used to enrich local-ECMWF data (Windy scrape) which only carries the core
+// fields: temp, rain, wind, gusts, wind_dir. Everything else comes from here.
+// Returns a Map keyed by UTC timestamp (ms) →
+//   { rh, cloud_base, uv_index, pressure, wcode, cloud }
+async function fetchSupplementaryData(loc) {
+    try {
+        // No model constraint — best_match is used, which reliably provides uv_index.
+        // ECMWF IFS and NAM do not expose uv_index in Open-Meteo hourly variables,
+        // so we accept that pressure/sky/cloud here may come from a slightly
+        // different model run than Windy's ECMWF temp/wind data. For local fishing
+        // forecasts the model-mixing is acceptable and keeps the scraper minimal.
+        const params = new URLSearchParams({
+            latitude:  loc.lat,
+            longitude: loc.lon,
+            hourly:    'temperature_2m,dew_point_2m,relative_humidity_2m,uv_index,pressure_msl,weather_code,cloud_cover',
+            wind_speed_unit: 'ms',
+            timezone:  'UTC',
+            forecast_days: FORECAST_DAYS,
+            past_days: 1,
+        });
+        const res = await fetch(`${API_URL}?${params}`);
+        if (!res.ok) return null;
+        const raw = await res.json();
+        const h = raw?.hourly;
+        if (!h?.time) return null;
+        const lookup = new Map();
+        for (let i = 0; i < h.time.length; i++) {
+            const ts  = Date.parse(h.time[i] + 'Z');
+            const t   = h.temperature_2m?.[i];
+            const td  = h.dew_point_2m?.[i];
+            const lcl = (t != null && td != null) ? Math.round((t - td) * 400) : null;
+            const pHpa = h.pressure_msl?.[i];
+            lookup.set(ts, {
+                rh:         h.relative_humidity_2m?.[i] ?? null,
+                cloud_base: lcl != null && lcl > 0 ? lcl : null,
+                uv_index:   h.uv_index?.[i] ?? null,
+                pressure:   pHpa != null ? Math.round(pHpa * 0.750062) : null,  // hPa → mmHg
+                wcode:      h.weather_code?.[i] ?? null,                         // WMO code
+                cloud:      h.cloud_cover?.[i] ?? null,                          // % cloud cover
+            });
+        }
+        return lookup;
+    } catch (e) {
+        console.warn('[supp] fetch failed:', e);
+        return null;
+    }
+}
+
+// Merge supplementary lookup into an already-processed data object in-place.
+// Matches each local timestamp to the closest API entry within ±90 min.
+function _closestSuppEntry(supp, ts) {
+    if (supp.has(ts)) return supp.get(ts);
+    let best = null, bestDiff = Infinity;
+    for (const [t, v] of supp) {
+        const diff = Math.abs(t - ts);
+        if (diff < bestDiff && diff <= 5400000) { bestDiff = diff; best = v; }
+    }
+    return best;
+}
+
+// Used for local ECMWF: fills non-core supplementary fields, preferring
+// any archive-seeded values (from forecast-data.js, written by the
+// scheduled task with Open-Meteo best_match + past_days=5) over the live
+// supp fetch (which only goes past_days=1 and may be on a model that
+// returns null for historical slots).
+//
+// Architecture: the archive is the source of truth for the historical
+// window; the live fetch only gap-fills slots the archive doesn't cover
+// (e.g. brand-new days that appeared after the most recent scrape).
+function mergeSupplementary(processed, supp) {
+    if (!supp) return;
+    // Snapshot the archive-seeded arrays before we rebuild them.
+    const prev = {
+        rh:         Array.isArray(processed.rh)         ? processed.rh         : [],
+        cloud_base: Array.isArray(processed.cloud_base) ? processed.cloud_base : [],
+        uv_index:   Array.isArray(processed.uv_index)   ? processed.uv_index   : [],
+        pressure:   Array.isArray(processed.pressure)   ? processed.pressure   : [],
+        wcode:      Array.isArray(processed.wcode)      ? processed.wcode      : [],
+        cloud:      Array.isArray(processed.cloud)      ? processed.cloud      : [],
+    };
+    processed.rh         = [];
+    processed.cloud_base = [];
+    processed.uv_index   = [];
+    processed.pressure   = [];
+    processed.wcode      = [];
+    processed.cloud      = [];
+    processed.timestamps.forEach((ts, i) => {
+        const e = _closestSuppEntry(supp, ts);
+        // Archive-first for every supplementary field: prev[i] (from forecast-data.js)
+        // wins when present; falls back to live supp; falls back to null.
+        processed.rh.push(        prev.rh[i]         ?? e?.rh         ?? null);
+        processed.cloud_base.push(prev.cloud_base[i] ?? e?.cloud_base ?? null);
+        processed.uv_index.push(  prev.uv_index[i]   ?? e?.uv_index   ?? null);
+        processed.pressure.push(  prev.pressure[i]   ?? e?.pressure   ?? null);
+        processed.wcode.push(     prev.wcode[i]      ?? e?.wcode      ?? null);
+        processed.cloud.push(     prev.cloud[i]      ?? e?.cloud      ?? null);
+    });
+}
+
+// Used for API models: fills only uv_index (rh + cloud_base already come from main fetch).
+function mergeUVOnly(processed, supp) {
+    if (!supp) return;
+    processed.uv_index = processed.timestamps.map(ts =>
+        _closestSuppEntry(supp, ts)?.uv_index ?? null
+    );
+}
+
+async function loadLocation(loc, forceRefresh = false) {
+    // ── Priority 1: local ECMWF file (forecast-data.js written by scheduled task) ──
+    // Only active when the user has selected the "ECMWF Local" model tab.
+    // All other model tabs (ECMWF API, GFS, NAM) skip this block entirely and go
+    // straight to the Open-Meteo API, even for freshwater locations.
+    const isFreshwaterLoc = LOCATION_SETS.freshwater.some(l => l.id === loc.id);
+    if (isFreshwaterLoc && activeModel === 'ecmwf-local') {
+        const fd          = window.FORECAST_DATA;
+        const generated   = fd?.generated ? new Date(fd.generated) : null;
+        const ageDays     = generated ? (Date.now() - generated.getTime()) / 86400000 : Infinity;
+        const localEntry  = fd?.locations?.find(l => l.id === loc.id);
+
+        if (!localEntry || ageDays > 4) {
+            showStaleState(loc, ageDays);
+            renderSummary();
+            return;
+        }
+
+        // File exists and is fresh — use it, then overlay RH/cloud_base/UV from API
+        const processed = processLocalData(localEntry);
+        const supp = await fetchSupplementaryData(loc);
+        mergeSupplementary(processed, supp);
+        weatherData[loc.id] = processed;
+        // Set fetchedAt so the cache-freshness check doesn't spam the API on reload
+        weatherFetchedAt[loc.id] = Date.now();
+        updateSourceBadge(loc);
+        populateCard(loc, processed);
+        locations.forEach(l => {
+            if (l.id === loc.id) return;
+            const cached = filteredDataCache[l.id];
+            if (cached) drawChart(l.id, activeChartTab, cached);
+        });
+        renderSummary();
+        return;
+    }
+
+    // ── Priority 2: localStorage cache (still fresh, not forcing refresh) ────────
+    const ageMs = weatherFetchedAt[loc.id] ? Date.now() - weatherFetchedAt[loc.id] : Infinity;
+    const isFresh = ageMs < CACHE_MINUTES * 60 * 1000;
+    if (!forceRefresh && isFresh && weatherData[loc.id]) {
+        populateCard(loc, weatherData[loc.id]);
+        renderSummary();
+        return;
+    }
+
+    // ── Priority 3: Open-Meteo API fallback ──────────────────────────────────────
+    try {
+        const [raw, supp] = await Promise.all([fetchWeather(loc), fetchSupplementaryData(loc)]);
+        const processed = processData(raw);
+        mergeUVOnly(processed, supp);   // UV via best_match — works for all models
+        weatherData[loc.id] = processed;
+        weatherFetchedAt[loc.id] = Date.now();
+        // Stash the raw API response so we can inspect it in DevTools:
+        // open console and type:  wx.raw[<id>]   or   wx.dump(<id>)
+        window.wx = window.wx || {};
+        if (!window.wx.raw) window.wx.raw = {};
+        window.wx.raw[loc.id] = raw;
+        persistCache();   // write cache to localStorage so reloads serve from it
+        // Show model elevation in subtitle (helps spot sea-vs-ridge mismatches)
+        if (loc.id === locations[0].id && raw.elevation != null) {
+            document.getElementById('model-ref').textContent =
+                `Model: ${activeModel.toUpperCase()} · grid elevation ${Math.round(raw.elevation)} m`;
+        }
+        populateCard(loc, processed);
+        // Newly-arrived data may shift the global wind max or temp range.
+        // Redraw any sibling charts that have already been painted so they
+        // pick up the new shared y-axis and the three cards stay directly
+        // comparable at a glance.
+        locations.forEach(l => {
+            if (l.id === loc.id) return;
+            const cached = filteredDataCache[l.id];
+            if (cached) drawChart(l.id, activeChartTab, cached);
+        });
+    } catch (err) {
+        const body = document.getElementById(`body-${loc.id}`);
+        if (body) body.innerHTML = `<div class="error-state">⚠️ ${err.message}</div>`;
+    }
+    renderSummary();
+}
+
+async function refreshAll(force = false) {
+    // Check if the most recently fetched location is still within the cache window
+    const fetchTimes = Object.values(weatherFetchedAt);
+    if (!force && fetchTimes.length > 0) {
+        const latestFetch = Math.max(...fetchTimes);
+        const ageMinutes = (Date.now() - latestFetch) / 60000;
+        if (ageMinutes < CACHE_MINUTES) {
+            const remaining = Math.ceil(CACHE_MINUTES - ageMinutes);
+            const btn = document.querySelector('.btn-refresh');
+            const original = btn.textContent;
+            btn.textContent = `↻ Fresh (${remaining}m left)`;
+            btn.disabled = true;
+            btn.style.opacity = '0.55';
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.disabled = false;
+                btn.style.opacity = '';
+            }, 3000);
+            // Still re-render from cache so UI is consistent
+            locations.forEach(loc => { if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]); });
+            renderSummary();
+            const fetchedAt = new Date(latestFetch).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+            document.getElementById('updated-time').textContent = `Data fetched at ${fetchedAt} PT · refreshes in ${remaining} min`;
+            return;
+        }
+    }
+
+    // Data is stale — go fetch fresh data
+    document.getElementById('updated-time').textContent = 'Refreshing…';
+    locations.forEach(loc => {
+        const body = document.getElementById(`body-${loc.id}`);
+        if (body) body.innerHTML = '<div class="loading-state"><div class="spinner"></div><span style="font-size:13px">Loading…</span></div>';
+    });
+    for (const loc of locations) { await loadLocation(loc, true); }
+    const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    document.getElementById('updated-time').textContent = `Last updated: ${now} PT`;
+}
+
+// Overflow (⋮) menu helpers for each location card. Only one dropdown is
+// allowed to be open at a time — clicking another card's ⋮, or anywhere
+// outside the currently-open menu, closes it.
+function closeCardMenus() {
+    document.querySelectorAll('.card-menu-dropdown.open').forEach(el => {
+        el.classList.remove('open');
+        const btn = el.parentElement && el.parentElement.querySelector('.card-menu-btn');
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    });
+}
+
+function toggleCardMenu(locId, evt) {
+    if (evt) { evt.stopPropagation(); evt.preventDefault(); }
+    const dropdown = document.getElementById(`card-menu-${locId}`);
+    if (!dropdown) return;
+    const wasOpen = dropdown.classList.contains('open');
+    closeCardMenus();
+    if (!wasOpen) {
+        dropdown.classList.add('open');
+        const btn = dropdown.parentElement && dropdown.parentElement.querySelector('.card-menu-btn');
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+    }
+}
+
+// Global click listener: close any open dropdown when clicking outside of it.
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.card-menu')) closeCardMenus();
+});
+
+// Close on Escape for keyboard users.
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeCardMenus();
+});
+
+// Dump every timestamp → temp/wind value for a location, so you can compare
+// directly against windy.com (or any other forecast site) for the same coords.
+function debugDump(locId) {
+    const loc = locations.find(l => l.id === locId);
+    const d   = weatherData[locId];
+    const raw = window.wx && window.wx.raw ? window.wx.raw[locId] : null;
+    if (!loc || !d) return console.warn('No data for location', locId);
+
+    console.group(`🔍 ${loc.name} (${loc.lat}, ${loc.lon}) — model: ${activeModel} (${OPEN_METEO_MODELS[activeModel]})`);
+    console.log('Compare against:');
+    console.log('  • windy.com:', `https://www.windy.com/?${loc.lat},${loc.lon},10`);
+    console.log('  • open-meteo:', `https://open-meteo.com/en/docs?latitude=${loc.lat}&longitude=${loc.lon}&hourly=temperature_2m`);
+    if (raw && raw.elevation != null) {
+        console.log(`Grid elevation: ${raw.elevation} m · timezone: ${raw.timezone} (offset ${raw.utc_offset_seconds}s)`);
+        console.log('Units:', raw.hourly_units);
+    }
+
+    console.log('idx | PT time              |   °C  | wind m/s | gust m/s | dir');
+    console.log('----+----------------------+-------+----------+----------+----');
+    for (let i = 0; i < d.timestamps.length; i++) {
+        const ts = d.timestamps[i];
+        const pt = new Date(ts).toLocaleString('en-US', {
+            timeZone: PT, weekday: 'short', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit', hour12: true
+        });
+        const c  = d.temp[i] - 273.15;
+        console.log(
+            `${String(i).padStart(3)} | ${pt.padEnd(20)} | ` +
+            `${c.toFixed(1).padStart(5)} | ` +
+            `${d.windSpeed[i].toFixed(1).padStart(8)} | ` +
+            `${d.gusts[i].toFixed(1).padStart(8)} | ` +
+            `${Math.round(d.windDir[i])}°`
+        );
+    }
+    console.groupEnd();
+    console.log('%cTip: compare temperatures to windy.com — they should now be smooth and match within 1–2°C.', 'color:#7aa8c8');
+}
+
+// Expose for console use
+window.wx = window.wx || { raw: {}, dump: null, locations };
+window.wx.dump      = debugDump;
+window.wx.data      = weatherData;
+window.wx.locations = locations;
+
+function removeLocation(id) {
+    const card = document.getElementById(`card-${id}`);
+    if (card) card.remove();
+    locations = locations.filter(l => l.id !== id);
+    delete weatherData[id];
+    delete weatherFetchedAt[id];
+    persistCache();
+    renderSummary();
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal() {
+    document.getElementById('modal').classList.add('open');
+    document.getElementById('m-name').value = '';
+    document.getElementById('m-lat').value = '';
+    document.getElementById('m-lon').value = '';
+    document.getElementById('modal-error').style.display = 'none';
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+document.getElementById('modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
+
+async function addLocation() {
+    const name = document.getElementById('m-name').value.trim();
+    const lat  = parseFloat(document.getElementById('m-lat').value);
+    const lon  = parseFloat(document.getElementById('m-lon').value);
+    const errEl = document.getElementById('modal-error');
+
+    const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+    if (!name)                            return showErr('Please enter a location name.');
+    if (isNaN(lat) || lat < -90 || lat > 90)  return showErr('Latitude must be between -90 and 90.');
+    if (isNaN(lon) || lon < -180 || lon > 180) return showErr('Longitude must be between -180 and 180.');
+
+    const loc = { id: nextId++, name, label: name, lat, lon };
+    locations.push(loc);
+    closeModal();
+    createCard(loc);
+    await loadLocation(loc);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+// Try to load fresh ECMWF Local data from JSONBin before init.
+// Strategy: prefer whichever source has the newer `generated` timestamp.
+//   - On GitHub Pages: the local <script src="forecast-data.js"> 404s, so JSONBin wins by default.
+//   - Locally: if you just ran the skill, the local file is fresher than the bin → keep local.
+//   - If JSONBin is newer (e.g. someone else ran the skill), we adopt it.
+async function tryLoadFromJsonBin() {
+    try {
+        const res = await fetch('https://api.jsonbin.io/v3/b/69ebade636566621a8ea444d/latest');
+        if (!res.ok) return;
+        const json = await res.json();
+        const remote = json.record;
+        if (!remote || !remote.locations || !remote.locations.length) return;
+
+        const local = window.FORECAST_DATA;
+        const localTs  = local  && local.generated  ? Date.parse(local.generated)  : 0;
+        const remoteTs = remote && remote.generated ? Date.parse(remote.generated) : 0;
+
+        if (remoteTs > localTs) {
+            window.FORECAST_DATA = remote;
+            console.log('[wx] FORECAST_DATA loaded from JSONBin ·', remote.generated,
+                        local ? `(local was ${local.generated})` : '(no local file)');
+        } else {
+            console.log('[wx] Local forecast-data.js is fresher than JSONBin — keeping local ·',
+                        local.generated, 'vs bin', remote.generated);
+        }
+    } catch(e) {
+        console.warn('[wx] JSONBin fetch failed — using local file or API fallback', e);
+    }
+}
+
+(async function init() {
+    // Load fresh forecast data from JSONBin (works on GitHub Pages without local file)
+    await tryLoadFromJsonBin();
+
+    // Restore saved model button state
+    document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+    const savedBtn = document.getElementById(`btn-${activeModel}`);
+    if (savedBtn) savedBtn.classList.add('active');
+    // If the saved model is inside the dropdown, also activate the More button
+    const dropdownModels = ['gfs', 'namConus'];
+    const moreBtn = document.getElementById('btn-more-models');
+    if (dropdownModels.includes(activeModel) && moreBtn) {
+        moreBtn.classList.add('active');
+        moreBtn.textContent = (savedBtn?.textContent || 'More') + ' ▾';
+    }
+
+    // Restore saved water-type switcher state (freshwater / saltwater)
+    document.querySelectorAll('.water-btn').forEach(b => b.classList.remove('active'));
+    const waterBtn = document.getElementById(`water-${activeLocationSet}`);
+    if (waterBtn) waterBtn.classList.add('active');
+
+    renderDayTabs();
+    locations.forEach(createCard);
+
+    // If any cached data is still fresh, render it immediately so a reload
+    // shows consistent numbers instead of firing a fresh API call (which is
+    // what was causing the "random number" jitter on rapid reloads).
+    locations.forEach(loc => {
+        if (weatherData[loc.id]) populateCard(loc, weatherData[loc.id]);
+    });
+    if (Object.keys(weatherData).length) renderSummary();
+
+    // loadLocation(loc, false) respects the 30-min cache — fresh entries skip the API.
+    for (const loc of locations) { await loadLocation(loc, false); }
+
+    const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+    const modelLabel = activeModel === 'ecmwf-local' ? 'ECMWF (JSONBin)' : activeModel.toUpperCase();
+    document.getElementById('updated-time').textContent = `Last updated: ${now} PT · Model: ${modelLabel} · auto-refreshes after ${CACHE_MINUTES} min`;
+
+    // Restore summary collapsed state
+    if (localStorage.getItem('wx-summary-collapsed') === 'true') {
+        document.getElementById('summary-section').classList.add('collapsed');
+    }
+})();
+
+function toggleSummary() {
+    const section = document.getElementById('summary-section');
+    const collapsed = section.classList.toggle('collapsed');
+    localStorage.setItem('wx-summary-collapsed', collapsed);
+}

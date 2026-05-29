@@ -1,0 +1,1714 @@
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0c1520;
+            color: #d0dce8;
+            min-height: 100vh;
+        }
+
+        header {
+            background: linear-gradient(135deg, #111f30, #0c1520);
+            padding: 18px 32px;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            gap: 16px;
+            border-bottom: 1px solid #1e3048;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            box-shadow: 0 2px 24px rgba(0,0,0,0.5);
+        }
+
+        .header-left h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.4px;
+        }
+
+        .header-left .subtitle {
+            font-size: 12px;
+            color: #4a7a9a;
+            margin-top: 2px;
+        }
+
+        .header-actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
+
+        .btn {
+            padding: 9px 18px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s;
+            letter-spacing: 0.2px;
+        }
+
+        .btn-refresh {
+            background: #1a2e42;
+            color: #7dd3fc;
+            border: 1px solid #1e3a52;
+        }
+
+        .btn-refresh:hover { background: #1e3a52; }
+
+        .btn-primary {
+            background: #1d4ed8;
+            color: white;
+        }
+
+        .btn-primary:hover { background: #2563eb; }
+
+        .main {
+            padding: 28px 32px;
+            max-width: 1700px;
+            margin: 0 auto;
+        }
+
+        /* ── Water-type switcher (Freshwater / Saltwater) ──
+           Lives inside the top page header alongside the model switcher, so
+           it's compact: smaller padding, no margin. */
+        .water-switcher {
+            display: inline-flex;
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 10px;
+            padding: 3px;
+            gap: 2px;
+        }
+
+        .water-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border: none;
+            background: none;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 7px;
+            transition: all 0.2s;
+            letter-spacing: 0.2px;
+        }
+
+        .water-btn .water-icon { font-size: 14px; line-height: 1; }
+
+        .water-btn:hover:not(.active) { color: #7ab0d0; background: #142036; }
+
+        .water-btn.active {
+            background: linear-gradient(135deg, #1d4ed8, #1e40af);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(29, 78, 216, 0.35);
+        }
+
+        .water-btn#water-saltwater.active {
+            background: linear-gradient(135deg, #0e7490, #155e75);
+            box-shadow: 0 2px 8px rgba(14, 116, 144, 0.4);
+        }
+
+        /* ── Summary Section ── */
+        .summary-section {
+            background: linear-gradient(135deg, #111f30, #0e1a28);
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            padding: 24px 28px;
+            margin-bottom: 28px;
+        }
+
+        .section-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #4a7a9a;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .section-title::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #1e3048;
+        }
+
+        .section-title:hover { color: #6a9ab8; }
+
+        .section-chevron {
+            font-size: 10px;
+            color: #3a6a8a;
+            transition: transform 0.25s ease;
+            flex-shrink: 0;
+        }
+
+        .summary-section.collapsed .section-chevron { transform: rotate(-90deg); }
+
+        .summary-body {
+            overflow: hidden;
+            transition: max-height 0.3s ease, opacity 0.25s ease;
+            max-height: 2000px;
+            opacity: 1;
+        }
+
+        .summary-section.collapsed .summary-body {
+            max-height: 0;
+            opacity: 0;
+        }
+
+        .summary-section.collapsed {
+            padding-bottom: 20px;
+        }
+
+        .summary-section.collapsed .section-title {
+            margin-bottom: 0;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .summary-card {
+            background: #0c1520;
+            border-radius: 12px;
+            padding: 14px 16px;
+            border: 1px solid #1e3048;
+            transition: border-color 0.2s;
+        }
+
+        .summary-card:hover { border-color: #2a4a6a; }
+
+        .summary-card .s-label {
+            font-size: 11px;
+            color: #4a7a9a;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .summary-card .s-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #fff;
+            margin: 6px 0 2px;
+            line-height: 1;
+        }
+
+        .summary-card .s-sub {
+            font-size: 12px;
+            color: #3a6a8a;
+        }
+
+        /* ── Bass Fishing Insights ──────────────────────────────────────────
+           Cards are ranked top-down. Top card gets a soft accent border to
+           pull the eye; everything else matches the rest of the dashboard's
+           card visual language (dark fill, blue-grey border, blue accents).
+           ────────────────────────────────────────────────────────────────── */
+        /* Weekly outlook strip — macro pattern view above the weekend cards.
+           Left border carries the pattern semantics (warming = orange,
+           cooling = blue, etc.) so the eye can scan the colour before
+           reading prose. */
+        .weekly-outlook {
+            margin-bottom: 14px;
+            padding: 12px 16px;
+            background: rgba(20, 35, 55, 0.45);
+            border: 1px solid #1e3048;
+            border-left: 3px solid #4a7a9a;
+            border-radius: 10px;
+        }
+        .weekly-outlook .wo-label {
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #4a7a9a;
+            margin-bottom: 4px;
+        }
+        .weekly-outlook .wo-headline {
+            font-size: 14px;
+            color: #d6e6f4;
+            line-height: 1.4;
+        }
+        .weekly-outlook .wo-headline strong { color: #fff; font-weight: 600; }
+        .weekly-outlook .wo-impact {
+            font-size: 12px;
+            color: #7aa8c8;
+            margin-top: 6px;
+        }
+        .weekly-outlook .wo-impact strong { color: #d6e6f4; font-weight: 600; }
+        /* Horizon-edge cues — used when the peak/valley sits on the last
+           day of the forecast (trend likely continues past visible data). */
+        .weekly-outlook .wo-arrow {
+            display: inline-block;
+            margin-left: 2px;
+            color: #d97b3a;
+            font-weight: 600;
+        }
+        .weekly-outlook .wo-horizon-note {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #7a96b0;
+            font-style: italic;
+        }
+        .weekly-outlook.warming        { border-left-color: #d97b3a; }
+        .weekly-outlook.cooling        { border-left-color: #5a9bd4; }
+        .weekly-outlook.midweek_peak   { border-left-color: #c87a4a; }
+        .weekly-outlook.midweek_valley { border-left-color: #6aa8c8; }
+        .weekly-outlook.steady         { border-left-color: #4a7a9a; }
+        .weekly-outlook.mixed          { border-left-color: #8a8aa8; }
+
+        /* ──────────────────────────────────────────────────────────────
+           Track A — phase arc + week pattern tag (PRD §2).
+           Sit inside .weekly-outlook, below existing headline / impact.
+           Phase chips use the 5-tier polarity (bad / warn / neutral /
+           good-mild / good) — judgment colors, distinct from data colors
+           used in the temp/wind charts.
+           ────────────────────────────────────────────────────────────── */
+        .wo-week-tag {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(122, 168, 200, 0.15);
+            font-size: 12px;
+            flex-wrap: wrap;
+        }
+        .wo-week-tag .wt-label {
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #7aa8c8;
+            opacity: 0.75;
+        }
+        .wo-week-tag .wt-value {
+            font-weight: 600;
+            color: #d6e6f4;
+        }
+        .wo-week-tag .wt-sep { color: #4a7a9a; }
+        .wo-week-tag .wt-conf {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #7aa8c8;
+        }
+        .wo-week-tag .wt-conf::before {
+            content: '';
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #6a7a8a;
+        }
+        .wo-week-tag .wt-conf.high::before    { background: #5aa06a; }
+        .wo-week-tag .wt-conf.medium::before  { background: #c8a04a; }
+        .wo-week-tag .wt-conf.low::before     { background: #b85a5a; }
+
+        .wo-phase-arc {
+            display: flex;
+            gap: 6px;
+            margin-top: 10px;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+        .wo-phase-cell {
+            flex: 1 1 0;
+            min-width: 64px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+        .wo-phase-cell .wpc-day {
+            font-size: 10px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #7a96b0;
+        }
+        .wo-phase-chip {
+            position: relative;
+            width: 100%;
+            padding: 6px 4px 5px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            color: #f0f4f8;
+            background: rgba(106, 122, 138, 0.25);
+            border-color: rgba(106, 122, 138, 0.45);
+        }
+        /* Phase semantic colors — fishing-impact polarity, not data values. */
+        .wo-phase-chip.tone-good      { background: rgba(74, 138, 90, 0.30);  border-color: rgba(74, 138, 90, 0.55); }
+        .wo-phase-chip.tone-good-mild { background: rgba(106, 154, 106, 0.22); border-color: rgba(106, 154, 106, 0.45); }
+        .wo-phase-chip.tone-warn      { background: rgba(200, 160, 74, 0.22); border-color: rgba(200, 160, 74, 0.45); }
+        .wo-phase-chip.tone-bad       { background: rgba(184, 90, 90, 0.25);  border-color: rgba(184, 90, 90, 0.50); }
+        .wo-phase-chip.tone-neutral   { background: rgba(106, 122, 138, 0.22); border-color: rgba(106, 122, 138, 0.40); }
+        /* Confidence dot — small circle bottom-right of the chip. */
+        .wo-phase-chip .wpc-dot {
+            position: absolute;
+            right: 4px; bottom: 4px;
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #6a7a8a;
+            opacity: 0.9;
+        }
+        .wo-phase-chip .wpc-dot.high    { background: #5aa06a; }
+        .wo-phase-chip .wpc-dot.medium  { background: #c8a04a; }
+        .wo-phase-chip .wpc-dot.low     { background: #8a8a8a; }
+
+        /* ── Daily Insights pane (per-card Data ↔ Insights toggle) ───────────
+           Phase chip + rationale on top, then 3 stacked category sections
+           (Pressure / Temperature / Wind & gust). Each section: label + now
+           value on one row, then a 72h sparkline, then 3 delta tiles. Tones
+           reuse the wo-phase-chip palette to keep visual language unified
+           across the three insight lenses. */
+        .di-pane { padding: 18px 22px 20px; }
+
+        /* Top row: chip + rationale block. Rationale wraps next to the chip. */
+        .di-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+        .di-rationale-block {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #b8cad8;
+            flex: 1;
+            padding-top: 2px;
+        }
+        .di-day-label {
+            font-size: 10px;
+            color: #5a7a92;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+            font-weight: 600;
+        }
+
+        .di-chip {
+            position: relative;
+            padding: 10px 16px 9px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            color: #f0f4f8;
+            background: rgba(106, 122, 138, 0.25);
+            border-color: rgba(106, 122, 138, 0.45);
+            min-width: 88px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .di-chip.tone-good      { background: rgba(74, 138, 90, 0.30);  border-color: rgba(74, 138, 90, 0.55); }
+        .di-chip.tone-good-mild { background: rgba(106, 154, 106, 0.22); border-color: rgba(106, 154, 106, 0.45); }
+        .di-chip.tone-warn      { background: rgba(200, 160, 74, 0.22); border-color: rgba(200, 160, 74, 0.45); }
+        .di-chip.tone-bad       { background: rgba(184, 90, 90, 0.25);  border-color: rgba(184, 90, 90, 0.50); }
+        .di-chip.tone-neutral   { background: rgba(106, 122, 138, 0.22); border-color: rgba(106, 122, 138, 0.40); }
+        .di-chip .di-dot {
+            position: absolute;
+            right: 5px; bottom: 5px;
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #6a7a8a;
+            opacity: 0.9;
+        }
+        .di-chip .di-dot.high    { background: #5aa06a; }
+        .di-chip .di-dot.medium  { background: #c8a04a; }
+        .di-chip .di-dot.low     { background: #8a8a8a; }
+
+        /* Per-category section — one block per Pressure/Temp/Wind. */
+        .di-section {
+            padding: 12px 0 14px;
+            border-top: 1px solid rgba(40, 60, 88, 0.5);
+        }
+        .di-section:first-of-type { border-top: none; padding-top: 4px; }
+        .di-section-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .di-section-label {
+            font-size: 11px;
+            color: #6a8aa8;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .di-section-val {
+            font-size: 20px;
+            font-weight: 600;
+            color: #e0eaf4;
+            line-height: 1;
+        }
+        .di-section-unit {
+            font-size: 11px;
+            color: #6a8aa8;
+            margin-left: 3px;
+            font-weight: 400;
+        }
+        .di-section-sub {
+            font-size: 12px;
+            color: #8aa0b8;
+            margin-left: 6px;
+            font-weight: 400;
+        }
+        .di-section-sub-unit {
+            font-size: 10px;
+            color: #6a8aa8;
+        }
+
+        .di-spark {
+            width: 100%;
+            height: 110px;
+            display: block;
+            margin-bottom: 8px;
+        }
+        .di-spark-empty {
+            font-size: 11px;
+            color: #6a7a8a;
+            font-style: italic;
+            padding: 14px 0;
+            text-align: center;
+        }
+        .di-deltas {
+            display: grid;
+            /* grid-template-columns is set INLINE per-section so each chip
+               aligns to the DAY SEGMENT (sunrise→sunset band) it labels.
+               Structure: [lead] [Day72H chip] [Night1] [Day48H chip]
+               [Night2] [Day24H chip] [trail = Night3 + today-to-dusk].
+               Default here is an even three-up fallback for the rare case
+               where sunByDate is missing. */
+            grid-template-columns: 0% 1fr 0% 1fr 0% 1fr 0%;
+            /* No gap: column percentages already sum to 100% of the chart
+               width and adding a gap would visually nudge tiles off their
+               chart-segment alignment. Tile breathing room is handled via
+               border + margin below. */
+            gap: 0;
+        }
+        .di-delta-spacer {
+            /* Empty grid cells for the dawn/dusk framing — match the
+               chart's leading/trailing extension so tiles align to their
+               actual 24h chart segments. */
+        }
+        .di-delta {
+            /* Chip is now a single-line caption: "72h ↑1.5". No background,
+               no border, no padding — the chip's horizontal POSITION on the
+               day band is the only visual link to the chart now (the tile
+               chrome was redundant with that). Saves ~25px vertical per
+               section, which the chart claims back via taller .di-spark. */
+            display: flex;
+            justify-content: center;
+            align-items: baseline;
+            gap: 5px;
+            /* Clip content cleanly at column boundaries — same partial-data
+               edge case as before (e.g. 24h-only history collapses 48H+72H
+               cells to 0% width). Without this, the chip's text would
+               overflow into adjacent grid cells. */
+            overflow: hidden;
+            box-sizing: border-box;
+            min-width: 0;
+            white-space: nowrap;
+            font-size: 13px;
+            color: #cfdce8;
+        }
+        .di-delta-label {
+            font-size: 11px;
+            color: #6a8aa8;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            /* No margin — label sits inline with the value */
+        }
+        .di-delta-val {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e0eaf4;
+        }
+        /* Bass-fishing polarity classes — generic so they work anywhere
+           (delta tiles, headline value+arrow, future chips). Same 5-tier
+           palette as the Weekend Insights dots so the reader learns one
+           color language across the whole app:
+             green   = good for bass    (front feed, warming, breeze settling)
+             yellow  = warning           (post-front, cooling, roughening)
+             red     = strong negative   (bluebird, cold crash, gale, glass)
+           JS deltaPolarity() decides which tier applies per category. */
+        .pol-good      { color: #4ade80; }  /* strong positive */
+        .pol-good-mild { color: #86efac; }  /* mild positive   */
+        .pol-neutral   { color: #7a96b0; }  /* noise band       */
+        .pol-warn      { color: #fbbf24; }  /* mild headwind   */
+        .pol-bad       { color: #f87171; }  /* strong negative */
+        .di-delta-val.dim { color: #5a6a7a; }  /* missing data — tile-scoped */
+
+        /* Arrow color is intentionally DECOUPLED from polarity. Direction
+           (↑/↓) and tier (good/warn/bad) are orthogonal axes, and color
+           is the wrong channel to encode both — once a single hue means
+           "rising + warning" you can no longer display drift honestly,
+           because a soft rise inside the noise band still inherits the
+           warning hue. So the arrow always renders in muted slate; only
+           the magnitude number takes the polarity tier color. */
+        .di-delta-arrow,
+        .di-headline-arrow {
+            color: #8a9fb5;
+            font-weight: 600;
+            margin-right: 2px;
+        }
+        /* 48H / 72H tiles are SUPPORTING CONTEXT, not verdicts. Only the
+           24H tile carries the primary scoring weight (Signal 1). To
+           keep all three from reading as equal verdicts, .ctx tiles get
+           a muted variant of the same hue family — same colors, lower
+           saturation via opacity 0.55. The hue family stays consistent
+           so the eye links 24H + 48H + 72H as one signal told three ways. */
+        .di-delta.ctx .pol-good,
+        .di-delta.ctx .pol-good-mild,
+        .di-delta.ctx .pol-neutral,
+        .di-delta.ctx .pol-warn,
+        .di-delta.ctx .pol-bad,
+        .di-delta.ctx .di-delta-arrow {
+            opacity: 0.55;
+        }
+        .di-delta.ctx .di-delta-label {
+            opacity: 0.75;
+        }
+        /* The trail cell labels the SELECTED day-band (post-sunset
+           portion of today/the selected day in the date picker). It
+           carries only a label — no delta — because comparing the
+           selected day to itself is meaningless. Visual treatment
+           mirrors .ctx (muted, lower weight) so it reads as wayfinding,
+           not a fourth competing verdict. */
+        .di-delta.di-delta-selected .di-delta-label {
+            opacity: 0.75;
+        }
+
+        .insights-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 8px 16px;
+            margin-bottom: 14px;
+            font-size: 12px;
+            color: #7aa8c8;
+        }
+        .insights-head .ih-window {
+            color: #4a7a9a;
+            font-size: 11px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .insights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+        }
+        .insight-card {
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 12px;
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: border-color 0.2s, transform 0.15s ease;
+        }
+        .insight-card:hover { border-color: #2a4a6a; }
+        .insight-card.rank-1 {
+            border-color: #2a5a3a;
+            background: linear-gradient(135deg, #0d2218, #0c1520 60%);
+        }
+        .insight-card.rank-1:hover { border-color: #3a7a4a; }
+
+        .insight-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .insight-rank {
+            font-size: 16px;
+            flex: 0 0 auto;
+        }
+        .insight-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+            flex: 1 1 auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .insight-score {
+            font-size: 12px;
+            font-weight: 700;
+            color: #4ade80;
+            flex: 0 0 auto;
+            letter-spacing: 0.04em;
+        }
+        .insight-score.med { color: #fbbf24; }
+        .insight-score.low { color: #f97316; }
+        .insight-score.bad { color: #f87171; }
+
+        .insight-window {
+            font-size: 13px;
+            font-weight: 600;
+            color: #7aa8c8;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .insight-window .iw-or {
+            font-size: 11px;
+            font-weight: 500;
+            color: #7aa8c8;
+            opacity: 0.45;
+            letter-spacing: 0.04em;
+            text-transform: lowercase;
+        }
+        .insight-window .iw-alt {
+            font-size: 13px;
+            font-weight: 500;
+            color: #7aa8c8;
+            opacity: 0.65;
+        }
+        .insight-mode {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid #1a4a2a;
+            background: #0d2a1a;
+            color: #4ade80;
+            align-self: flex-start;
+        }
+        .insight-mode.ambush {
+            background: #2a1d08;
+            color: #fbbf24;
+            border-color: #4a3410;
+        }
+
+        .insight-reasons {
+            list-style: none;
+            padding: 0;
+            margin: 2px 0 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .insight-reason {
+            font-size: 12px;
+            line-height: 1.4;
+            color: #c5d3e2;
+            display: grid;
+            grid-template-columns: 10px 1fr;
+            gap: 8px;
+            /* Default dot — slate; overridden by .r-good / .r-good-mild / .r-neutral / .r-warn / .r-bad. */
+            --dot: #4a7a9a;
+        }
+        .insight-reason::before {
+            content: '';
+            display: block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--dot);
+            margin-top: 5px;
+            justify-self: center;
+            /* Subtle glow keeps the dot legible on the dark card without
+               needing a thicker outline. Matches the score-pill palette. */
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot) 18%, transparent);
+        }
+        /* 5-tier polarity spectrum: bad ← warn ← neutral → good-mild → good.
+           Yellow now means "warning" (headwind), not "no signal" — the calm
+           slate dot owns the baseline so we don't conflate the two states. */
+        .insight-reason.r-good      { --dot: #4ade80; }   /* green        — strong positive */
+        .insight-reason.r-good-mild { --dot: #86efac; }   /* pale green   — direction right, mild */
+        .insight-reason.r-neutral   { --dot: #94a3b8; }   /* slate        — true baseline */
+        .insight-reason.r-warn      { --dot: #fbbf24; }   /* amber        — mild headwind */
+        .insight-reason.r-bad       { --dot: #f87171; }   /* red          — strong negative */
+        .insight-reason .ir-why {
+            display: block;
+            font-size: 11px;
+            color: #6a8aaa;
+            margin-top: 2px;
+        }
+        .insight-empty {
+            grid-column: 1/-1;
+            padding: 16px;
+            text-align: center;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-style: italic;
+        }
+
+        /* ── Stability Forecast panel ── */
+        .stability-forecast {
+            margin-top: 16px;
+            background: linear-gradient(135deg, #0e1a2c, #101e30);
+            border: 1px solid #1e3048;
+            border-radius: 14px;
+            padding: 16px 20px 18px;
+        }
+        .sf-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .sf-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: #e0eaf4;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .sf-subtitle {
+            font-size: 11px;
+            color: #7aa8c8;
+            font-weight: 500;
+        }
+        .sf-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 14px;
+        }
+        @media (max-width: 900px) { .sf-grid { grid-template-columns: 1fr; } }
+        .sf-col {
+            background: #0c1520;
+            border: 1px solid #1a2e42;
+            border-radius: 10px;
+            padding: 12px 14px;
+        }
+        .sf-col-head {
+            font-size: 11px;
+            font-weight: 700;
+            color: #7aa8c8;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .sf-col-sub {
+            font-size: 11px;
+            color: #3a6a8a;
+            margin-bottom: 12px;
+        }
+        .sf-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 0;
+            border-bottom: 1px dashed #1a2e42;
+        }
+        .sf-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .sf-row:first-child { padding-top: 0; }
+        .sf-rank {
+            flex: 0 0 auto;
+            width: 22px;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.3;
+        }
+        .sf-body { flex: 1 1 auto; min-width: 0; }
+        .sf-row-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+        .sf-loc {
+            font-size: 13px;
+            font-weight: 700;
+            color: #fff;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .sf-score {
+            font-size: 11px;
+            font-weight: 700;
+            color: #4ade80;
+            flex: 0 0 auto;
+        }
+        .sf-score.med { color: #fbbf24; }
+        .sf-score.low { color: #f97316; }
+        .sf-score.bad { color: #ef4444; }
+        .sf-reason {
+            font-size: 11px;
+            color: #a5b9d0;
+            line-height: 1.45;
+        }
+        .sf-chip {
+            display: inline-block;
+            padding: 1px 7px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin: 2px 4px 0 0;
+            background: #112235;
+            color: #7aa8c8;
+            border: 1px solid #1a2e42;
+        }
+        .sf-chip.good { background: #0d2a1a; color: #4ade80; border-color: #1a4a2a; }
+        .sf-chip.warn { background: #2a1d08; color: #fbbf24; border-color: #4a3410; }
+        .sf-chip.bad  { background: #2a1012; color: #f87171; border-color: #4a1a1d; }
+        .sf-empty {
+            font-size: 12px;
+            color: #4a7a9a;
+            font-style: italic;
+            padding: 8px 0;
+        }
+
+        .recommendation-box {
+            background: linear-gradient(135deg, #0d2a1a, #0a1f15);
+            border: 1px solid #1a4a2a;
+            border-radius: 12px;
+            padding: 14px 20px;
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+        }
+
+        .rec-icon { font-size: 26px; flex-shrink: 0; }
+
+        .rec-text strong {
+            color: #4ade80;
+            font-size: 14px;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .rec-text span {
+            color: #6a9a7a;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .compare-strip {
+            display: flex;
+            gap: 8px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .compare-chip {
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 20px;
+            padding: 5px 12px;
+            font-size: 12px;
+            color: #7a9ab0;
+        }
+
+        .compare-chip strong { color: #a0c8e8; }
+
+        /* ── Location Cards ── */
+        .locations-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 22px;
+        }
+
+        .location-card {
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            overflow: hidden;
+            transition: border-color 0.2s;
+        }
+
+        .location-card:hover { border-color: #2a4a6a; }
+
+        .card-header {
+            padding: 18px 22px 14px;
+            background: linear-gradient(135deg, #142036, #0e1a2c);
+            border-bottom: 1px solid #1e3048;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .card-header h3 {
+            font-size: 17px;
+            color: #fff;
+            font-weight: 700;
+        }
+
+        .card-header .loc-label {
+            font-size: 12px;
+            color: #3a6a8a;
+            margin-top: 3px;
+        }
+
+        .remove-btn {
+            background: none;
+            border: none;
+            color: #3a5a7a;
+            cursor: pointer;
+            font-size: 16px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.2s;
+            line-height: 1;
+        }
+
+        .remove-btn:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+
+        /* Per-card view switcher (Data ↔ Insights). Mirrors the global model
+           switcher so the visual language is consistent: a pair of pill
+           buttons, the active one filled in. Lives in the card header between
+           the title block and the kebab menu. */
+        .view-switcher {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+            margin-right: 8px;
+        }
+        .view-btn {
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .view-btn.active {
+            background: #0f3460;
+            border-color: #1a5a9a;
+            color: #7dd3fc;
+            font-weight: 700;
+        }
+        .view-btn:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        /* Per-card overflow menu (vertical dots → dropdown with actions).
+           Debug dump + remove location used to sit exposed in the header;
+           tucking them behind "⋮" keeps the header tidy. */
+        .card-menu {
+            position: relative;
+        }
+
+        .card-menu-btn {
+            background: none;
+            border: none;
+            color: #4a7a9a;
+            cursor: pointer;
+            font-size: 20px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            line-height: 1;
+            transition: all 0.2s;
+        }
+
+        .card-menu-btn:hover { color: #e0eaf4; background: #1a2e42; }
+
+        .card-menu-dropdown {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            min-width: 180px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 10px;
+            padding: 4px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+            display: none;
+        }
+
+        .card-menu-dropdown.open { display: block; }
+
+        .card-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            padding: 8px 10px;
+            background: none;
+            border: none;
+            color: #cfe7ff;
+            font-size: 13px;
+            text-align: left;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: background 0.15s;
+        }
+
+        .card-menu-item:hover { background: #142036; }
+        .card-menu-item.danger { color: #fca5a5; }
+        .card-menu-item.danger:hover { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+
+        .card-menu-item .menu-icon { font-size: 14px; line-height: 1; width: 16px; text-align: center; }
+
+        /* Current conditions row */
+        .current-conditions {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .cond-item {
+            padding: 14px 16px;
+            text-align: center;
+            border-right: 1px solid #1e3048;
+            border-bottom: 1px solid #1e3048;
+        }
+
+        /* Remove right border on every 3rd item (last in each row) */
+        .cond-item:nth-child(3n) { border-right: none; }
+        /* Remove bottom border on last row of 3 items */
+        .cond-item:nth-last-child(-n+3) { border-bottom: none; }
+        /* Keep last-child override for safety */
+        .cond-item:last-child { border-right: none; }
+
+        .cond-label {
+            font-size: 10px;
+            color: #3a6a8a;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .cond-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #fff;
+            margin: 5px 0 3px;
+            line-height: 1;
+        }
+
+        .cond-sub {
+            font-size: 11px;
+            color: #3a6a8a;
+        }
+
+        /* Gust sub-label is slightly larger so the color-coded value is easy to scan */
+        .cc-wind-sub { font-size: 13px; }
+        .cc-wind-sub strong { font-size: 14px; }
+
+        /* Wind direction arrow */
+        .wind-arrow {
+            display: inline-block;
+            font-size: 20px;
+            line-height: 1;
+        }
+
+        /* Chart area */
+        .chart-area {
+            padding: 18px 22px 20px;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .chart-tabs {
+            display: flex;
+            gap: 6px;
+        }
+
+        .sun-info {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: #7aa8c8;
+            letter-spacing: 0.2px;
+        }
+
+        .sun-info .sun-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background: #0e1a28;
+            border: 1px solid #1a2e42;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+
+        .sun-info .sun-icon {
+            font-size: 13px;
+            line-height: 1;
+        }
+
+        .sun-info .sun-sunrise { color: #fbbf24; }
+        .sun-info .sun-sunset  { color: #a78bfa; }
+
+        .chart-tab {
+            padding: 5px 14px;
+            border-radius: 20px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chart-tab.active {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: white;
+        }
+
+        .chart-tab:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .chart-wrapper {
+            height: 285px;
+            position: relative;
+        }
+
+        /* Loading & Error */
+        .loading-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 48px 20px;
+            color: #3a6a8a;
+            gap: 12px;
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid #1e3048;
+            border-top-color: #1d4ed8;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .error-state {
+            margin: 16px 22px;
+            background: #2a1414;
+            border: 1px solid #4a2020;
+            border-radius: 10px;
+            padding: 14px 16px;
+            color: #ff8080;
+            font-size: 13px;
+        }
+
+        .stale-state {
+            margin: 32px 22px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            text-align: center;
+        }
+
+        .stale-state .stale-icon {
+            font-size: 32px;
+            line-height: 1;
+            opacity: 0.5;
+        }
+
+        .stale-state .stale-msg {
+            font-size: 14px;
+            font-weight: 600;
+            color: #c0a060;
+        }
+
+        .stale-state .stale-sub {
+            font-size: 12px;
+            color: #4a6a7a;
+        }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.75);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.open { display: flex; }
+
+        .modal {
+            background: #111f30;
+            border: 1px solid #1e3048;
+            border-radius: 16px;
+            padding: 28px;
+            width: 420px;
+            max-width: 94vw;
+        }
+
+        .modal h3 {
+            font-size: 17px;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .modal p {
+            font-size: 13px;
+            color: #4a7a9a;
+            margin-bottom: 22px;
+        }
+
+        .form-group { margin-bottom: 14px; }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #4a7a9a;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 8px;
+            color: #e0eaf4;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #1d4ed8;
+        }
+
+        .form-group input::placeholder { color: #2a4a6a; }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+
+        .btn-cancel { background: #1a2e42; color: #7a9ab0; flex: 1; }
+        .btn-cancel:hover { background: #1e3a52; }
+        .btn-add-confirm { background: #1d4ed8; color: white; flex: 1; }
+        .btn-add-confirm:hover { background: #2563eb; }
+
+        .modal-error {
+            background: #2a1414;
+            border: 1px solid #4a2020;
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: #ff8080;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }
+
+        .geo-hint {
+            font-size: 12px;
+            color: #2a5a7a;
+            margin-top: 6px;
+        }
+
+        .geo-hint a { color: #3a7aaa; }
+
+        /* Forecast next-peak bar — stretches edge-to-edge, items share width equally */
+        .forecast-peek {
+            display: flex;
+            gap: 6px;
+            padding: 10px 22px 0;
+        }
+
+        .peek-item {
+            flex: 1 1 0;
+            min-width: 0;
+            text-align: center;
+            padding: 7px 4px;
+            border-radius: 8px;
+            background: #0c1520;
+            border: 1px solid #1a2e42;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .peek-item:hover { border-color: #2a5a7a; background: #0f1a2e; }
+        .peek-item.active { border-color: #1d4ed8; background: #0f1e3a; box-shadow: inset 0 0 0 1px #1d4ed8; }
+
+        .peek-time { font-size: 10px; color: #3a6a8a; }
+        .peek-temp { font-size: 13px; font-weight: 700; color: #fff; margin: 2px 0; }
+        .peek-wind { font-size: 10px; color: #4a8ab0; }
+
+        /* Tiny hour badge inside each condition label — updates as user hovers */
+        .cond-time {
+            font-size: 9px;
+            color: #7dd3fc;
+            background: rgba(29, 78, 216, 0.18);
+            padding: 2px 6px;
+            border-radius: 10px;
+            margin-left: 6px;
+            font-weight: 600;
+            letter-spacing: 0;
+            text-transform: none;
+            vertical-align: 1px;
+        }
+
+        /* Full-width bar that holds the day tabs just above the location cards.
+           Stretches edge-to-edge inside the main column and centers its row. */
+        .day-tabs-bar {
+            margin: 22px 0 18px;
+            padding: 12px 18px;
+            background: #0c1520;
+            border: 1px solid #1e3048;
+            border-radius: 14px;
+            display: flex;
+            justify-content: center;
+        }
+
+        /* Period / day toggle (Mon–Sun tabs) */
+        .period-toggle {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .period-btn {
+            padding: 8px 16px;
+            border-radius: 10px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 64px;
+            line-height: 1.2;
+        }
+
+        .period-btn .day-name { font-size: 13px; font-weight: 600; }
+        .period-btn .day-date { font-size: 11px; opacity: 0.7; margin-top: 1px; }
+
+        .period-btn:hover:not(.active):not(:disabled) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .period-btn.active {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .period-btn.active .day-date { opacity: 0.85; }
+
+        .period-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+            text-decoration: line-through;
+            text-decoration-color: #3a5a7a;
+        }
+
+        .period-btn:disabled:hover { border-color: #1e3048; color: #4a7a9a; }
+
+        /* Weekend tint — a subtle warm amber wash on Sat/Sun so the eye can
+           pick out the weekend column at a glance. Selected weekend days use
+           a saturated amber fill (instead of the weekday blue) so the warm
+           theme carries through into the active state as well. */
+        .period-btn.weekend {
+            background: rgba(251, 146, 60, 0.05);
+            border-color: rgba(251, 146, 60, 0.28);
+            color: #c99566;
+        }
+        .period-btn.weekend:hover:not(.active):not(:disabled) {
+            border-color: rgba(251, 146, 60, 0.55);
+            color: #e3b17f;
+            background: rgba(251, 146, 60, 0.1);
+        }
+        .period-btn.weekend.active {
+            background: #ea7a1f;         /* warm saturated amber */
+            border-color: #ea7a1f;
+            color: #fff;
+        }
+        .period-btn.weekend.active .day-date { opacity: 0.9; }
+
+        .model-switcher {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+
+        .model-switcher label {
+            font-size: 12px;
+            color: #4a7a9a;
+            white-space: nowrap;
+        }
+
+        .model-btn {
+            padding: 5px 12px;
+            border-radius: 6px;
+            border: 1px solid #1e3048;
+            background: none;
+            color: #4a7a9a;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .model-btn.active {
+            background: #0f3460;
+            border-color: #1a5a9a;
+            color: #7dd3fc;
+            font-weight: 700;
+        }
+
+        .model-btn:hover:not(.active) { border-color: #2a5a7a; color: #7ab0d0; }
+
+        .model-dropdown { position: relative; }
+        .model-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            background: #111f30;
+            border: 1px solid #1e3a52;
+            border-radius: 8px;
+            padding: 4px;
+            z-index: 200;
+            min-width: 110px;
+            flex-direction: column;
+            gap: 2px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .model-dropdown-menu.open { display: flex; }
+        .model-dropdown-menu .model-btn { width: 100%; text-align: left; border-radius: 5px; }
+
+        .no-data-msg {
+            text-align: center;
+            color: #3a6a8a;
+            padding: 32px;
+            font-size: 13px;
+            font-style: italic;
+        }
+
+        /* ── Tablet (≤ 900px) ────────────────────────────────────────── */
+        @media (max-width: 900px) {
+            .locations-grid {
+                grid-template-columns: 1fr;
+            }
+            .main {
+                padding: 20px 20px;
+            }
+            header {
+                padding: 16px 20px;
+            }
+        }
+
+        /* ── Mobile (≤ 640px) ────────────────────────────────────────── */
+        @media (max-width: 640px) {
+
+            /* Header: collapse to 2-row grid
+               Row 1: title (left) + water switcher (right)
+               Row 2: model + refresh controls (full width) */
+            header {
+                padding: 12px 14px;
+                grid-template-columns: 1fr auto;
+                grid-template-rows: auto auto;
+                gap: 10px 8px;
+            }
+
+            .header-left {
+                grid-column: 1;
+                grid-row: 1;
+                min-width: 0;
+            }
+
+            .header-left h1 {
+                font-size: 16px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .header-left .subtitle {
+                font-size: 11px;
+            }
+
+            /* Water switcher: top-right, icon-only to save width */
+            #water-switcher {
+                grid-column: 2;
+                grid-row: 1;
+                align-self: center;
+            }
+
+            .water-btn span:not(.water-icon) {
+                display: none;
+            }
+
+            .water-btn {
+                padding: 6px 10px;
+            }
+
+            /* Actions: second row, full width */
+            .header-actions {
+                grid-column: 1 / -1;
+                grid-row: 2;
+                justify-content: flex-start;
+                flex-wrap: nowrap;
+                gap: 6px;
+            }
+
+            .model-switcher {
+                margin-left: 0;
+                gap: 4px;
+            }
+
+            /* Hide "Model:" label — implied by button row */
+            .model-switcher label {
+                display: none;
+            }
+
+            .model-btn {
+                padding: 5px 9px;
+                font-size: 11px;
+            }
+
+            /* Refresh: compact, pushed to right */
+            .btn-refresh {
+                padding: 6px 10px;
+                font-size: 12px;
+                margin-left: auto;
+            }
+
+            /* Add Location: hide on mobile (modal UX awkward on small screens) */
+            .btn-primary {
+                display: none;
+            }
+
+            /* ── Main content ── */
+            .main {
+                padding: 12px 12px;
+            }
+
+            /* Summary */
+            .summary-section {
+                padding: 16px 14px;
+                margin-bottom: 14px;
+            }
+
+            /* Day tabs bar */
+            .day-tabs-bar {
+                padding: 8px 10px;
+                margin: 12px 0 10px;
+            }
+
+            .period-btn {
+                padding: 6px 8px;
+                min-width: 48px;
+                font-size: 12px;
+            }
+
+            .period-btn .day-name { font-size: 12px; }
+            .period-btn .day-date { font-size: 10px; }
+
+            /* ── Location cards ── */
+            .locations-grid {
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+
+            .card-header {
+                padding: 14px 16px 12px;
+            }
+
+            .card-header h3 {
+                font-size: 15px;
+            }
+
+            /* Conditions: keep 3-col, reduce padding */
+            .cond-item {
+                padding: 10px 8px;
+            }
+
+            .cond-value {
+                font-size: 19px;
+            }
+
+            .cond-label {
+                font-size: 9px;
+            }
+
+            /* Forecast peek: horizontal scroll instead of squishing */
+            .forecast-peek {
+                padding: 10px 14px 0;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                scroll-snap-type: x proximity;
+                gap: 5px;
+                /* hide scrollbar visually but keep scroll */
+                scrollbar-width: none;
+            }
+
+            .forecast-peek::-webkit-scrollbar { display: none; }
+
+            .peek-item {
+                flex: 0 0 56px;
+                scroll-snap-align: start;
+                padding: 6px 3px;
+            }
+
+            /* Chart */
+            .chart-area {
+                padding: 12px 12px 14px;
+            }
+
+            .chart-wrapper {
+                height: 300px;
+            }
+
+            .chart-header {
+                margin-bottom: 10px;
+                gap: 8px;
+            }
+
+            .sun-info {
+                gap: 5px;
+            }
+
+            .sun-info .sun-item {
+                padding: 3px 6px;
+                font-size: 10px;
+            }
+
+            /* Modal: already 94vw, just tighten padding */
+            .modal {
+                padding: 20px 16px;
+            }
+        }
