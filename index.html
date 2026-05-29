@@ -600,6 +600,15 @@
         .di-delta.ctx .di-delta-label {
             opacity: 0.75;
         }
+        /* The trail cell labels the SELECTED day-band (post-sunset
+           portion of today/the selected day in the date picker). It
+           carries only a label — no delta — because comparing the
+           selected day to itself is meaningless. Visual treatment
+           mirrors .ctx (muted, lower weight) so it reads as wayfinding,
+           not a fourth competing verdict. */
+        .di-delta.di-delta-selected .di-delta-label {
+            opacity: 0.75;
+        }
 
         .insights-head {
             display: flex;
@@ -1915,10 +1924,12 @@ let activeModel  = localStorage.getItem('wx-model-v2') || 'ecmwf-local'; // v2 r
 // Which chart is shown inside every card — 'temp' or 'wind'. Switching on one
 // card applies to all cards (cross-card tab sync) and is persisted.
 let activeChartTab = localStorage.getItem('wx-chart-tab') || 'temp';
-// Per-card view: 'data' (default) or 'insights' (phase chip + 72h trajectory).
-// Per-card on purpose — Andrew may want to inspect Insights on one lake while
-// reading Data on another. Not persisted; session-only state.
-let cardView = {};   // locId → 'data' | 'insights'
+// Card view: 'data' (default) or 'insights' (phase chip + 72h trajectory).
+// GLOBAL state — clicking Insights on any card flips ALL cards, same as how
+// the chart tab and day tabs already sync across cards. Single mental model:
+// view selection is a lens applied to the whole dashboard, not a per-card
+// setting. Persisted to localStorage so the chosen lens survives reloads.
+let activeCardView = localStorage.getItem('wx-card-view') || 'data';
 // NOTE: For the Windy Point Forecast free API, `temp-surface` is interpreted
 // differently per model:
 //   • GFS   → 2m air temperature (what a thermometer reads) ✓
@@ -2334,7 +2345,7 @@ function approxSunTimes(lat, lon, dateStr) {
 // Converts one entry from window.FORECAST_DATA.locations into the same internal
 // shape that processData() returns, so all downstream rendering code works as-is.
 function processLocalData(entry) {
-    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [];
+    const timestamps = [], temp = [], windSpeed = [], windDir = [], gusts = [], precip = [], cloud = [], wcode = [], pressure = [], rh = [], cloud_base = [], uv_index = [];
     // PDT = UTC-7, PST = UTC-8. Detect from the generated timestamp if present,
     // otherwise default to -7 (ECMWF task runs in summer/spring).
     const tzOffset = 7; // hours behind UTC
@@ -2370,23 +2381,29 @@ function processLocalData(entry) {
             // WMO codes + cloud-cover % so weatherGlyph() and cloudBg() work as-is.
             cloud.push((day.cloud_pct      || [])[i] ?? null);
             wcode.push((day.wmo_code       || [])[i] ?? null);
-            // pressure intentionally not seeded here — mergeSupplementary()
-            // builds it from Open-Meteo, which is now the only pressure source.
-            // The old `pressure_windy` frozen snapshot was removed when Windy
-            // stopped providing pressure data; leaving it in caused the
-            // insights engine to score every window as "stable" (null delta).
+            // Archive-seeded supplementary fields. The scheduled task writes
+            // these into forecast-data.js using Open-Meteo `best_match` with
+            // past_days=5, so historical days have proper reanalysis values.
+            // mergeSupplementary() will fill any null slots from the live
+            // supp fetch (past_days=1), so today/forward still gets the
+            // freshest values while history is preserved.
+            pressure.push((day.pressure_mmhg  || [])[i] ?? null);
+            rh.push((day.rh_pct               || [])[i] ?? null);
+            cloud_base.push((day.cloud_base_ft|| [])[i] ?? null);
+            uv_index.push((day.uv_index       || [])[i] ?? null);
         }
     }
-    const n = timestamps.length;
     return {
         timestamps, windSpeed, windDir, gusts, temp, precip,
-        // rh, cloud_base, uv_index, pressure are null here — filled by mergeSupplementary()
-        rh:         new Array(n).fill(null),
+        // All 6 supplementary fields are seeded from forecast-data.js when
+        // available. mergeSupplementary fills only the slots the archive
+        // couldn't cover (e.g. brand-new days before the next scrape run).
+        rh,
         cloud,
         wcode,
-        pressure:   new Array(n).fill(null),
-        cloud_base: new Array(n).fill(null),
-        uv_index:   new Array(n).fill(null),
+        pressure,
+        cloud_base,
+        uv_index,
         sunByDate,
         _source:    'local-ecmwf'
     };
@@ -2763,8 +2780,8 @@ function createCard(loc) {
                 <div class="loc-label">${loc.label} &nbsp;·&nbsp; ${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}</div>
             </div>
             <div class="view-switcher" data-loc-id="${loc.id}">
-                <button class="view-btn active" id="view-data-${loc.id}" onclick="setCardView(${loc.id}, 'data', this)" title="Forecast data, peek tiles, charts">Data</button>
-                <button class="view-btn" id="view-insights-${loc.id}" onclick="setCardView(${loc.id}, 'insights', this)" title="Bass-relevant phase + 72h trajectory">Insights</button>
+                <button class="view-btn ${activeCardView === 'data' ? 'active' : ''}" id="view-data-${loc.id}" onclick="setView('data')" title="Forecast data, peek tiles, charts">Data</button>
+                <button class="view-btn ${activeCardView === 'insights' ? 'active' : ''}" id="view-insights-${loc.id}" onclick="setView('insights')" title="Bass-relevant phase + 72h trajectory">Insights</button>
             </div>
             <div class="card-menu" data-loc-id="${loc.id}">
                 <button class="card-menu-btn" onclick="toggleCardMenu(${loc.id}, event)" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
@@ -2784,11 +2801,11 @@ function populateCard(loc, rawD) {
     const body = document.getElementById(`body-${loc.id}`);
     if (!body) return;
 
-    // Insights view is per-card. It reads the FULL unfiltered series (rawD)
-    // because the phase classifier needs ~72h of backward context — not the
-    // PT-day slice that the Data view shows. We branch early so the Data
-    // rendering path is untouched.
-    if ((cardView[loc.id] || 'data') === 'insights') {
+    // Insights view is GLOBAL across cards. It reads the FULL unfiltered
+    // series (rawD) because the phase classifier needs ~72h of backward
+    // context — not the PT-day slice that the Data view shows. We branch
+    // early so the Data rendering path is untouched.
+    if (activeCardView === 'insights') {
         body.innerHTML = renderInsightsView(loc, rawD);
         return;
     }
@@ -4271,30 +4288,21 @@ function renderInsightsView(loc, rawD) {
         }).join('');
 
         // ── Night-shading layer ────────────────────────────────────────────
-        // Mirrors the Data view's sunBarsPlugin: very subtle indigo wash
-        // for night intervals + dashed slate bars at each sunrise/sunset
-        // crossing inside the window. Drawn BEHIND the polygon fill so
-        // the data shape stays the foreground subject.
+        // Subtle indigo wash for night intervals. The day/night rhythm
+        // alone carries the temporal structure — we previously had dashed
+        // bars at each sunrise/sunset crossing too, but they were doing
+        // the same job as the night blocks (delineating day from night)
+        // with more visual noise. Removed for cleanliness; the night
+        // wash + the weekday chip labels are now the only temporal cues
+        // inside the chart. Drawn BEHIND the polygon fill so the data
+        // shape stays the foreground subject.
         let nightHtml = '';
-        let barsHtml  = '';
         if (opts.sunByDate) {
             const nights = nightRangesFor(tStart, tEnd, opts.sunByDate);
             nightHtml = nights.map(r => {
                 const x = xForT(r.start);
                 const w = Math.max(xForT(r.end) - x, 0.5);
                 return `<rect x="${x.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}" fill="rgba(76,81,191,0.09)"/>`;
-            }).join('');
-            // Drop any crossing that lands within 1 minute of either edge.
-            // Those are the dawn(72h ago)/dusk(today) boundaries that define
-            // the chart's display window itself — rendering a dashed bar
-            // there would just be redrawing the chart's own outer frame and
-            // adds visual noise without conveying new information.
-            const EDGE_EPS = 60 * 1000;
-            const crossings = sunCrossingsIn(tStart, tEnd, opts.sunByDate)
-                .filter(t => (t - tStart) > EDGE_EPS && (tEnd - t) > EDGE_EPS);
-            barsHtml = crossings.map(t => {
-                const x = xForT(t).toFixed(1);
-                return `<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="rgba(100,130,160,0.6)" stroke-width="1" stroke-dasharray="3 3"/>`;
             }).join('');
         }
 
@@ -4314,7 +4322,6 @@ function renderInsightsView(loc, rawD) {
                 </defs>
                 ${nightHtml}
                 <polygon points="${fillStr}" fill="url(#${hGradId})" mask="url(#${maskId})" stroke="none"/>
-                ${barsHtml}
                 <polyline points="${lineStr}" fill="none" stroke="url(#${hGradId})" stroke-width="1.5"/>
             </svg>
         `;
@@ -4395,13 +4402,32 @@ function renderInsightsView(loc, rawD) {
                 gridCols = `${lead.toFixed(2)}% ${w72.toFixed(2)}% ${gap1.toFixed(2)}% ${w48.toFixed(2)}% ${gap2.toFixed(2)}% ${w24.toFixed(2)}% ${trail.toFixed(2)}%`;
             } else {
                 // Missing sun info for one of the three reference days →
-                // fall back to even 3-up (spacers collapsed to 0%).
-                gridCols = `0% 33.33% 0% 33.33% 0% 33.34% 0%`;
+                // fall back to even 4-up: three weekday chips + Selected
+                // chip get equal width. (Pre-Selected this was 3-up with
+                // trail=0%, but now the Selected label needs room or it
+                // clips under .di-delta { overflow: hidden }.)
+                gridCols = `0% 25% 0% 25% 0% 25% 25%`;
             }
         } else {
-            // No spark, no anchor, or no sunByDate → fall back to even 3-up.
-            gridCols = `0% 33.33% 0% 33.33% 0% 33.34% 0%`;
+            // No spark, no anchor, or no sunByDate → same even 4-up
+            // fallback. Trail must keep nonzero width so the Selected
+            // label has space to render (see comment above).
+            gridCols = `0% 25% 0% 25% 0% 25% 25%`;
         }
+
+        // Chip labels are the weekday name of the day SEGMENT each chip
+        // sits over (e.g. anchor=Mon → 24h chip reads SUN, 48h reads SAT,
+        // 72h reads FRI). Anchored to PT because the dashboard is PT
+        // end-to-end. Falls back to cat.now if anchorMs wasn't passed in
+        // — they're usually the same value anyway.
+        const lblAnchor = opts.anchorMs != null ? opts.anchorMs : cat.now;
+        const fmtWeekday = (ms) => new Date(ms).toLocaleDateString('en-US', {
+            weekday: 'short',
+            timeZone: 'America/Los_Angeles'
+        });
+        const lbl72 = fmtWeekday(lblAnchor - 72 * 3600 * 1000);
+        const lbl48 = fmtWeekday(lblAnchor - 48 * 3600 * 1000);
+        const lbl24 = fmtWeekday(lblAnchor - 24 * 3600 * 1000);
 
         return `
             <div class="di-section">
@@ -4414,35 +4440,39 @@ function renderInsightsView(loc, rawD) {
                 ${sparkSvg(category, cat, { floor, locId: loc.id, sunByDate: opts.sunByDate })}
                 <div class="di-deltas" style="grid-template-columns: ${gridCols};">
                     <!-- 7-cell grid mirroring the chart's day/night rhythm:
-                           [lead] [72H day] [Night 1] [48H day] [Night 2] [24H day] [trail]
+                           [lead] [Day-3 chip] [Night 1] [Day-2 chip] [Night 2] [Day-1 chip] [trail]
                          Each chip occupies the sunrise→sunset band of its
-                         reference day; the spacer cells fall under the
-                         night blocks (and the dusk-extension trail).
-                         The 24H chip carries the scoring verdict (Signal 1
-                         in the scoring rules — what state are bass in RIGHT
-                         NOW). The 48H and 72H chips are SUPPORTING CONTEXT
-                         (.ctx — same hue family, lower saturation) so the
-                         eye reads them as context, not three equal
-                         verdicts.
-                         Chips are now SINGLE-LINE captions (label + arrow +
-                         number); horizontal POSITION on the day band is the
-                         only visual link to the chart — no tile chrome. -->
+                         reference day and is labeled with that day's
+                         weekday name (e.g. SUN ↑1.5 if yesterday was
+                         Sunday). The 24h-ago chip carries the scoring
+                         verdict (Signal 1 — what state are bass in RIGHT
+                         NOW). The 48h-ago and 72h-ago chips are
+                         SUPPORTING CONTEXT (.ctx — same hue family, lower
+                         saturation) so the eye reads them as context, not
+                         three equal verdicts. -->
                     <div class="di-delta-spacer"></div>
                     <div class="di-delta ctx">
-                        <span class="di-delta-label">72h</span>
+                        <span class="di-delta-label">${lbl72}</span>
                         ${fmtDelta(category, cat.deltas.p72, 72, digits, cat.now)}
                     </div>
                     <div class="di-delta-spacer"></div>
                     <div class="di-delta ctx">
-                        <span class="di-delta-label">48h</span>
+                        <span class="di-delta-label">${lbl48}</span>
                         ${fmtDelta(category, cat.deltas.p48, 48, digits, cat.now)}
                     </div>
                     <div class="di-delta-spacer"></div>
                     <div class="di-delta">
-                        <span class="di-delta-label">24h</span>
+                        <span class="di-delta-label">${lbl24}</span>
                         ${fmtDelta(category, cat.deltas.p24, 24, digits, cat.now)}
                     </div>
-                    <div class="di-delta-spacer"></div>
+                    <!-- Trail cell sits in the post-sunset band of the
+                         selected day. No delta to show (you can't compare
+                         the selected day to itself), so it carries only a
+                         "Selected" label as a wayfinding anchor — tells
+                         the eye which day-band the chart belongs to. -->
+                    <div class="di-delta di-delta-selected">
+                        <span class="di-delta-label">Selected</span>
+                    </div>
                 </div>
             </div>
         `;
@@ -4498,24 +4528,33 @@ function renderInsightsView(loc, rawD) {
     `;
 }
 
-// Flip the per-card view between Data (default) and Insights (phase chip +
-// 72h trajectory). Per-card on purpose: switching one card doesn't disturb
-// the others. Re-uses populateCard so the rendering path stays single-source.
-function setCardView(locId, view, btn) {
+// Flip the GLOBAL card view between Data (default) and Insights (phase chip
+// + 72h trajectory). Mirrors how setChartTab works: one click flips every
+// card so the dashboard reads consistently. Persists to localStorage so the
+// chosen lens survives reloads. Re-uses populateCard so the rendering path
+// stays single-source per card.
+function setView(view) {
     if (view !== 'data' && view !== 'insights') view = 'data';
-    cardView[locId] = view;
+    if (activeCardView === view) return;   // no-op if already there
+    activeCardView = view;
+    try { localStorage.setItem('wx-card-view', view); } catch (e) {}
 
-    // Toggle the active class on this card's pair only
-    const switcher = btn && btn.parentElement;
-    if (switcher) {
-        switcher.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    }
+    // Sync the active class on EVERY card's switcher pair. We iterate all
+    // .view-switcher containers rather than relying on the clicked button's
+    // parent — clicking one button has to update the visual state of all
+    // five other cards' switchers too.
+    document.querySelectorAll('.view-switcher').forEach(switcher => {
+        switcher.querySelectorAll('.view-btn').forEach(b => {
+            const isActive = b.id.startsWith(`view-${view}-`);
+            b.classList.toggle('active', isActive);
+        });
+    });
 
-    // Re-render this card. populateCard branches on cardView[loc.id].
-    const loc = locations.find(l => l.id === locId);
-    const rawD = weatherData[locId];
-    if (loc && rawD) populateCard(loc, rawD);
+    // Re-render every card. populateCard branches on activeCardView.
+    locations.forEach(loc => {
+        const rawD = weatherData[loc.id];
+        if (rawD) populateCard(loc, rawD);
+    });
 }
 
 // ── Insights (bass fishing) ──────────────────────────────────────────────────
@@ -5127,27 +5166,43 @@ function _closestSuppEntry(supp, ts) {
     return best;
 }
 
-// Used for local ECMWF: overwrites all non-core fields from best_match API.
-// The Windy scrape only provides temp / wind / gusts / wind_dir / precip — every
-// other strip-row field (RH, cloud base, UV, pressure, sky icon code, cloud %)
-// is filled here so the scraper stays fast.
+// Used for local ECMWF: fills non-core supplementary fields, preferring
+// any archive-seeded values (from forecast-data.js, written by the
+// scheduled task with Open-Meteo best_match + past_days=5) over the live
+// supp fetch (which only goes past_days=1 and may be on a model that
+// returns null for historical slots).
+//
+// Architecture: the archive is the source of truth for the historical
+// window; the live fetch only gap-fills slots the archive doesn't cover
+// (e.g. brand-new days that appeared after the most recent scrape).
 function mergeSupplementary(processed, supp) {
     if (!supp) return;
+    // Snapshot the archive-seeded arrays before we rebuild them.
+    const prev = {
+        rh:         Array.isArray(processed.rh)         ? processed.rh         : [],
+        cloud_base: Array.isArray(processed.cloud_base) ? processed.cloud_base : [],
+        uv_index:   Array.isArray(processed.uv_index)   ? processed.uv_index   : [],
+        pressure:   Array.isArray(processed.pressure)   ? processed.pressure   : [],
+        wcode:      Array.isArray(processed.wcode)      ? processed.wcode      : [],
+        cloud:      Array.isArray(processed.cloud)      ? processed.cloud      : [],
+    };
     processed.rh         = [];
     processed.cloud_base = [];
     processed.uv_index   = [];
     processed.pressure   = [];
     processed.wcode      = [];
     processed.cloud      = [];
-    for (const ts of processed.timestamps) {
+    processed.timestamps.forEach((ts, i) => {
         const e = _closestSuppEntry(supp, ts);
-        processed.rh.push(e?.rh ?? null);
-        processed.cloud_base.push(e?.cloud_base ?? null);
-        processed.uv_index.push(e?.uv_index ?? null);
-        processed.pressure.push(e?.pressure ?? null);
-        processed.wcode.push(e?.wcode ?? null);
-        processed.cloud.push(e?.cloud ?? null);
-    }
+        // Archive-first for every supplementary field: prev[i] (from forecast-data.js)
+        // wins when present; falls back to live supp; falls back to null.
+        processed.rh.push(        prev.rh[i]         ?? e?.rh         ?? null);
+        processed.cloud_base.push(prev.cloud_base[i] ?? e?.cloud_base ?? null);
+        processed.uv_index.push(  prev.uv_index[i]   ?? e?.uv_index   ?? null);
+        processed.pressure.push(  prev.pressure[i]   ?? e?.pressure   ?? null);
+        processed.wcode.push(     prev.wcode[i]      ?? e?.wcode      ?? null);
+        processed.cloud.push(     prev.cloud[i]      ?? e?.cloud      ?? null);
+    });
 }
 
 // Used for API models: fills only uv_index (rh + cloud_base already come from main fetch).
